@@ -1,0 +1,20 @@
+{
+  "role": "gestor-trafego",
+  "categories": [
+    {"id": "campanhas", "name": "Campanhas", "color": "#6c72f8"},
+    {"id": "tracking", "name": "Tracking e API", "color": "#f04460"},
+    {"id": "criativos", "name": "Criativos", "color": "#f5923a"},
+    {"id": "investimento", "name": "Investimento", "color": "#ffd32a"},
+    {"id": "relatorios", "name": "Relatórios", "color": "#3ecfca"},
+    {"id": "recorrentes", "name": "Recorrentes Semanais", "color": "#9aa4b8"}
+  ],
+  "extraction_rules": [
+    "Capturar ajustes de campanha com prazo",
+    "Capturar pendências de orçamento",
+    "Capturar configurações de pixel e tracking",
+    "Capturar análises de performance solicitadas",
+    "Capturar solicitações de criativos e materiais"
+  ],
+  "cockpit_enabled": false,
+  "ekyte_enabled": true
+}

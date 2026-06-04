@@ -1,0 +1,20 @@
+{
+  "role": "gestor-projetos",
+  "categories": [
+    {"id": "clientes", "name": "Clientes", "color": "#6c72f8"},
+    {"id": "entregas", "name": "Entregas", "color": "#f5923a"},
+    {"id": "alinhamentos", "name": "Alinhamentos", "color": "#3ecfca"},
+    {"id": "dependencias", "name": "Dependências", "color": "#ffd32a"},
+    {"id": "riscos", "name": "Riscos", "color": "#f04460"},
+    {"id": "recorrentes", "name": "Recorrentes Semanais", "color": "#9aa4b8"}
+  ],
+  "extraction_rules": [
+    "Capturar pendências com cliente",
+    "Capturar follow-ups internos com prazo",
+    "Capturar impedimentos bloqueadores",
+    "Capturar aprovações pendentes",
+    "Capturar handoffs e passagens de bastão"
+  ],
+  "cockpit_enabled": false,
+  "ekyte_enabled": true
+}

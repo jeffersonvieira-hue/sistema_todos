@@ -1,0 +1,20 @@
+{
+  "role": "copywriter",
+  "categories": [
+    {"id": "briefings", "name": "Briefings", "color": "#6c72f8"},
+    {"id": "copys", "name": "Copys", "color": "#f5923a"},
+    {"id": "roteiros", "name": "Roteiros", "color": "#3ecfca"},
+    {"id": "revisoes", "name": "Revisões", "color": "#ffd32a"},
+    {"id": "pesquisa", "name": "Pesquisa e Referências", "color": "#9aa4b8"},
+    {"id": "recorrentes", "name": "Recorrentes Semanais", "color": "#9aa4b8"}
+  ],
+  "extraction_rules": [
+    "Capturar demandas de copy com prazo e cliente",
+    "Capturar ajustes de tom e revisões solicitadas",
+    "Capturar roteiros de vídeo/reels",
+    "Capturar headlines e promessas de oferta",
+    "Ignorar tarefas de tráfego/design sem copy envolvida"
+  ],
+  "cockpit_enabled": false,
+  "ekyte_enabled": true
+}

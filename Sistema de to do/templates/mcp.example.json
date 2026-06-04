@@ -1,0 +1,56 @@
+{
+  "mcpServers": {
+    "ekyte": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "supergateway@latest",
+        "--streamableHttp",
+        "https://n8n4.services4.collieassociados.com/mcp/mcp-ekyte-direct-v2",
+        "--header",
+        "Authorization: Bearer <PREENCHER_TOKEN_EKYTE>",
+        "--logLevel",
+        "none"
+      ]
+    },
+    "cockpit": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "supergateway@latest",
+        "--streamableHttp",
+        "https://mcp-cockpit.dados.collieassociados.com/mcp",
+        "--header",
+        "Authorization: Bearer <PREENCHER_TOKEN_COCKPIT>",
+        "--logLevel",
+        "none"
+      ]
+    },
+    "bigquery-calls": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "supergateway@latest",
+        "--streamableHttp",
+        "https://n8n4.services4.collieassociados.com/mcp/mcp-bigquery-global-calls-filtered",
+        "--header",
+        "Authorization: Bearer <PREENCHER_TOKEN_BIGQUERY_CALLS>",
+        "--logLevel",
+        "none"
+      ]
+    },
+    "bigquery-whatsapp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "supergateway@latest",
+        "--streamableHttp",
+        "https://n8n4.services4.collieassociados.com/mcp/mcp-bigquery-global-whatsapp-groups",
+        "--header",
+        "Authorization: Bearer <PREENCHER_TOKEN_BIGQUERY_WHATSAPP>",
+        "--logLevel",
+        "none"
+      ]
+    }
+  }
+}

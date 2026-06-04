@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "owner": "{{FULL_NAME}}",
+    "currentSprint": "{{SPRINT_KEY}}",
+    "lastUpdated": "{{TODAY}}"
+  },
+  "sprints": {
+    "{{SPRINT_KEY}}": {
+      "categories": []
+    }
+  }
+}

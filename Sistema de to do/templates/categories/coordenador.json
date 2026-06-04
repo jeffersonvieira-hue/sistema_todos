@@ -1,0 +1,20 @@
+{
+  "role": "coordenador",
+  "categories": [
+    {"id": "alertas", "name": "🚨 Alertas Críticos de Projetos", "color": "#f04460"},
+    {"id": "financeiro", "name": "Financeiro e Contratos", "color": "#f5923a"},
+    {"id": "projetos", "name": "Gestão de Projetos e Clientes", "color": "#6c72f8"},
+    {"id": "processos", "name": "Processos, Ferramentas e IA", "color": "#3ecfca"},
+    {"id": "equipe", "name": "Gestão da Equipe", "color": "#ffd32a"},
+    {"id": "recorrentes", "name": "Recorrentes Semanais", "color": "#9aa4b8"}
+  ],
+  "extraction_rules": [
+    "Capturar tarefas com owner explícito do usuário",
+    "Capturar tarefas direcionadas a 'todos os coordenadores' ou 'coordenação'",
+    "Capturar acompanhamentos críticos de projeto",
+    "Capturar alertas de Cockpit (Critical/Danger)",
+    "Ignorar tarefas com owner nominal de outro coordenador sem follow-up necessário"
+  ],
+  "cockpit_enabled": true,
+  "ekyte_enabled": true
+}

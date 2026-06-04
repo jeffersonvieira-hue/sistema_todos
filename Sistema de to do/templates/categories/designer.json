@@ -1,0 +1,19 @@
+{
+  "role": "designer",
+  "categories": [
+    {"id": "criativos", "name": "Criativos", "color": "#6c72f8"},
+    {"id": "landing-pages", "name": "Landing Pages", "color": "#f5923a"},
+    {"id": "identidade", "name": "Identidade Visual", "color": "#3ecfca"},
+    {"id": "revisoes", "name": "Revisões", "color": "#ffd32a"},
+    {"id": "referencias", "name": "Referências", "color": "#9aa4b8"},
+    {"id": "recorrentes", "name": "Recorrentes Semanais", "color": "#9aa4b8"}
+  ],
+  "extraction_rules": [
+    "Capturar peças solicitadas com briefing e prazo",
+    "Capturar revisões com feedback do cliente",
+    "Capturar referências de design aprovadas",
+    "Capturar prazos de entrega de design"
+  ],
+  "cockpit_enabled": false,
+  "ekyte_enabled": true
+}

@@ -1,0 +1,19 @@
+{
+  "role": "atendimento-crm",
+  "categories": [
+    {"id": "leads", "name": "Leads", "color": "#6c72f8"},
+    {"id": "crm", "name": "CRM", "color": "#f5923a"},
+    {"id": "atendimento", "name": "Atendimento", "color": "#3ecfca"},
+    {"id": "follow-up", "name": "Follow-up", "color": "#ffd32a"},
+    {"id": "automacoes", "name": "Automações", "color": "#9aa4b8"},
+    {"id": "recorrentes", "name": "Recorrentes Semanais", "color": "#9aa4b8"}
+  ],
+  "extraction_rules": [
+    "Capturar ajustes de fluxo CRM com prazo",
+    "Capturar qualificação de leads pendentes",
+    "Capturar follow-ups comerciais agendados",
+    "Capturar configurações de automação de atendimento"
+  ],
+  "cockpit_enabled": false,
+  "ekyte_enabled": true
+}

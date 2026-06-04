@@ -1,0 +1,19 @@
+{
+  "role": "dados-bi",
+  "categories": [
+    {"id": "dashboards", "name": "Dashboards", "color": "#6c72f8"},
+    {"id": "tracking", "name": "Tracking e Eventos", "color": "#f04460"},
+    {"id": "bases", "name": "Bases e Queries", "color": "#f5923a"},
+    {"id": "relatorios", "name": "Relatórios", "color": "#3ecfca"},
+    {"id": "automacoes", "name": "Automações", "color": "#ffd32a"},
+    {"id": "recorrentes", "name": "Recorrentes Semanais", "color": "#9aa4b8"}
+  ],
+  "extraction_rules": [
+    "Capturar dashboards a criar ou atualizar",
+    "Capturar eventos e tags a implementar",
+    "Capturar queries e integrações pendentes",
+    "Capturar validações de dados"
+  ],
+  "cockpit_enabled": false,
+  "ekyte_enabled": true
+}

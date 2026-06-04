@@ -1,0 +1,60 @@
+{
+  "schema_version": "2.0",
+  "user": {
+    "full_name": "{{FULL_NAME}}",
+    "display_name": "{{DISPLAY_NAME}}",
+    "email": "{{EMAIL}}",
+    "role": "{{ROLE}}",
+    "role_label": "{{ROLE_LABEL}}",
+    "bu": "{{BU}}",
+    "squad": "{{SQUAD}}"
+  },
+  "paths": {
+    "base_dir": "People/{{FULL_NAME}}",
+    "dashboard_html": "todos-dashboard.html",
+    "todos_data": "todos-data.json",
+    "state_dir": ".todos"
+  },
+  "calendar": {
+    "enabled": true,
+    "timezone": "America/Sao_Paulo",
+    "include_event_patterns": [],
+    "exclude_event_patterns": [],
+    "capture_team_wide_tasks": true
+  },
+  "extraction": {
+    "owner_names": ["{{FULL_NAME}}", "{{DISPLAY_NAME}}"],
+    "owner_aliases": [],
+    "capture_direct_assignments": true,
+    "capture_follow_ups": true,
+    "capture_role_responsibilities": true,
+    "ignore_other_people_tasks": true,
+    "role_rules": []
+  },
+  "dashboard": {
+    "title": "Todos — {{FULL_NAME}}",
+    "categories": [],
+    "hide_done_by_default": false,
+    "history_enabled": true,
+    "follow_enabled": true
+  },
+  "ekyte": {
+    "enabled": false,
+    "direct_create_enabled": false,
+    "default_workspace_id": null,
+    "default_project_id": null,
+    "default_task_type_id": null,
+    "default_assignee_email": "{{EMAIL}}",
+    "planned_task_default": true,
+    "default_due_days": 2,
+    "required_tags": {
+      "routine": true,
+      "week": true
+    }
+  },
+  "cockpit": {
+    "enabled": false,
+    "project_document_ids": [],
+    "ticker_filter": []
+  }
+}

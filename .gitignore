@@ -1,0 +1,14 @@
+.DS_Store
+node_modules/
+mcp.json
+**/mcp.json
+Sistema de to do/backups/
+Sistema de to do/releases/
+**/.todos/transcripts/
+**/.todos/archive/
+*.pyc
+__pycache__/
+
+# Pastas pessoais dos usuários são geradas localmente pelo instalador
+People/*
+!People/.gitkeep
