@@ -24,7 +24,7 @@ import os
 import re
 import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -152,6 +152,123 @@ def load_role_config(role: str) -> dict:
         return json.load(f)
 
 
+VALID_SYNC_PRESETS = ["yesterday", "last7", "custom"]
+
+
+def load_template_text(name: str) -> str:
+    path = TEMPLATES_DIR / name
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def sync_range_from_preset(preset: str, from_date: str | None = None, to_date: str | None = None) -> tuple[str, str]:
+    today = datetime.now().date()
+    if preset == "yesterday":
+        d = today - timedelta(days=1)
+        return d.isoformat(), d.isoformat()
+    if preset == "last7":
+        start = today - timedelta(days=6)
+        return start.isoformat(), today.isoformat()
+    if from_date and to_date:
+        return from_date, to_date
+    return today.isoformat(), today.isoformat()
+
+
+def collect_sync_range(args: argparse.Namespace, non_interactive: bool) -> dict:
+    preset = args.sync_preset
+    from_date = args.sync_from
+    to_date = args.sync_to
+
+    if args.skip_initial_sync:
+        return {"skip": True, "preset": None, "from": None, "to": None}
+
+    if not preset:
+        if non_interactive:
+            preset = "last7"
+        else:
+            print("\n─── Primeiro sync (range de reuniões) ───────────────────")
+            preset = ask_choice("Período inicial:", VALID_SYNC_PRESETS, "last7")
+
+    if preset == "custom" and not non_interactive and (not from_date or not to_date):
+        from_date = ask("Data inicial (YYYY-MM-DD)", (datetime.now().date() - timedelta(days=6)).isoformat())
+        to_date = ask("Data final (YYYY-MM-DD)", datetime.now().date().isoformat())
+    elif preset == "custom" and non_interactive and (not from_date or not to_date):
+        from_date, to_date = sync_range_from_preset("last7")
+
+    if preset != "custom":
+        from_date, to_date = sync_range_from_preset(preset, from_date, to_date)
+
+    return {
+        "skip": False,
+        "preset": preset,
+        "from": from_date,
+        "to": to_date,
+        "force_reprocess": False,
+    }
+
+
+def build_refresh_trigger(sync: dict) -> dict:
+    if sync.get("skip"):
+        return {}
+    return {
+        "from": sync["from"],
+        "to": sync["to"],
+        "force_reprocess": sync.get("force_reprocess", False),
+        "preset": sync.get("preset", "custom"),
+        "requested_at": now_iso(),
+        "source": "install_todos.py",
+    }
+
+
+def build_mapeamento_md(info: dict) -> str:
+    tmpl = load_template_text("mapeamento.template.md")
+    if not tmpl:
+        return f"# Mapeamento — {info['full_name']}\n\nPendente: rodar /todos-installer Fase B.\n"
+    vars = {
+        "NOW": now_iso(),
+        "FULL_NAME": info["full_name"],
+        "EMAIL": info["email"],
+        "ROLE_LABEL": info["role_label"],
+        "BU": info["bu"],
+        "SQUAD": info["squad"],
+        "DEFAULT_WORKSPACE_ID": info.get("ekyte_workspace") or "null",
+        "DEFAULT_TASK_TYPE_ID": "null",
+        "WEEK_NUMBER": str(week_number()),
+    }
+    return fill_template_str(tmpl, vars)
+
+
+def read_json(path: Path, default=None):
+    if not path.exists():
+        return default if default is not None else {}
+    with path.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
+def validate_mapping(ekyte_config: dict, user_config: dict) -> list[str]:
+    issues = []
+    workspaces = ekyte_config.get("workspaces") or []
+    real_workspaces = [w for w in workspaces if w.get("id") != "__other__" and not w.get("is_other")]
+    if not real_workspaces:
+        issues.append("ekyte-config.json: workspaces vazio (rode Fase B do /todos-installer)")
+
+    default_ws = ekyte_config.get("default_workspace_id")
+    if not default_ws:
+        issues.append("ekyte-config.json: default_workspace_id não definido")
+
+    cockpit = user_config.get("cockpit") or {}
+    if cockpit.get("enabled") and not (cockpit.get("project_document_ids") or []):
+        issues.append("user-config.json: cockpit habilitado mas project_document_ids vazio")
+
+    return issues
+
+
+def mapping_is_complete(state_dir: Path) -> bool:
+    state = read_json(state_dir / "install-state.json", {})
+    return state.get("mapping_status") == "complete"
+
+
 def check_prerequisites() -> list[str]:
     issues = []
     if not GENERATOR_SOURCE.exists():
@@ -226,6 +343,9 @@ def collect_user_info(args: argparse.Namespace) -> dict:
         "use_cockpit": use_cockpit,
         "ekyte_workspace": ekyte_workspace,
         "non_interactive": non_interactive,
+        "skip_mapping": args.skip_mapping,
+        "skip_initial_sync": args.skip_initial_sync,
+        "sync_range": collect_sync_range(args, non_interactive),
     }
 
 
@@ -377,25 +497,54 @@ def install(info: dict) -> Path:
     else:
         print(f"  – .todos/ekyte-config.json já existe, preservado")
 
-    # 5. Empty state files
+    # 5. Empty state files + install state
+    existing_state = read_json(state_dir / "install-state.json", {})
+    mapping_status = existing_state.get("mapping_status", "pending")
+    install_state = {
+        "installed_at": existing_state.get("installed_at") or now_iso(),
+        "updated_at": now_iso(),
+        "version": "2.1",
+        "user": info["full_name"],
+        "role": info["role"],
+        "mapping_status": mapping_status,
+        "bu": info["bu"],
+        "squad": info["squad"],
+    }
     empty_files = {
         "last-sync.json": {},
         "last-alerts.json": {"active_alerts": {}, "resolved_alerts_24h": {}},
         "ekyte-pending.json": [],
         "ekyte-errors.json": [],
         "refresh-errors.json": [],
-        "install-state.json": {
-            "installed_at": now_iso(),
-            "version": "2.0",
-            "user": info["full_name"],
-            "role": info["role"],
-        },
     }
     for filename, content in empty_files.items():
         path = state_dir / filename
         if not path.exists():
             write_json(path, content)
-    print(f"  ✓ arquivos de estado inicializados")
+
+    write_json(state_dir / "install-state.json", install_state)
+
+    # 5b. Mapeamento skeleton (somente se não existir)
+    mapeamento_path = state_dir / "mapeamento.md"
+    if not mapeamento_path.exists():
+        mapeamento_path.write_text(build_mapeamento_md(info), encoding="utf-8")
+        print(f"  ✓ .todos/mapeamento.md criado")
+    else:
+        print(f"  – .todos/mapeamento.md já existe, preservado")
+
+    # 5c. Refresh trigger para primeiro sync (somente se não existir)
+    sync = info.get("sync_range") or {}
+    trigger_path = state_dir / "refresh-trigger.json"
+    if not sync.get("skip") and not trigger_path.exists():
+        trigger = build_refresh_trigger(sync)
+        write_json(trigger_path, trigger)
+        print(f"  ✓ .todos/refresh-trigger.json ({trigger['from']} → {trigger['to']}, preset: {trigger['preset']})")
+    elif sync.get("skip"):
+        print(f"  – refresh-trigger omitido (--skip-initial-sync)")
+    else:
+        print(f"  – .todos/refresh-trigger.json já existe, preservado")
+
+    print(f"  ✓ arquivos de estado inicializados (mapping_status={mapping_status})")
 
     # 6. Generate dashboard
     print(f"\n─── Gerando dashboard inicial ──────────────────────────")
@@ -416,10 +565,10 @@ def install(info: dict) -> Path:
         else:
             print(f"  ⚠️  Geração falhou: {result2.stderr}")
 
-    return user_dir
+    return user_dir, state_dir
 
 
-def print_next_steps(info: dict, user_dir: Path) -> None:
+def print_next_steps(info: dict, user_dir: Path, mapping_issues: list[str] | None = None) -> None:
     print("\n" + "═" * 60)
     print("  ✅ INSTALAÇÃO CONCLUÍDA")
     print("═" * 60)
@@ -443,9 +592,18 @@ PRÓXIMOS PASSOS:
    Edite: {user_dir}/.todos/ekyte-config.json
    Preencha: workspaces, projetos e tipos de task reais.
 
-5. Atualizar to-dos do dia:
-   /atualiza-todos (no Claude Code)
+5. Mapeamento Ekyte + Cockpit (obrigatório na 1ª vez):
+   /todos-installer
+   (Fase B: busca workspaces, projetos e time no MCP)
+
+6. Primeiro sync de reuniões (usa o range gravado em refresh-trigger.json):
+   /atualiza-todos
 """)
+    if mapping_issues:
+        print("\n⚠️  Mapeamento incompleto:")
+        for issue in mapping_issues:
+            print(f"   - {issue}")
+        print("\n   Rode /todos-installer (Fase B) antes de usar Ekyte ou Cockpit.\n")
     if not info.get("use_ekyte"):
         print("  ℹ️  Ekyte desabilitado. Para habilitar depois, edite user-config.json.")
     if not info.get("use_cockpit"):
@@ -461,6 +619,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--bu", help="Unidade/BU")
     parser.add_argument("--squad", help="Squad")
     parser.add_argument("--yes", "-y", action="store_true", help="Modo não-interativo: aceitar todos os padrões")
+    parser.add_argument(
+        "--sync-preset",
+        choices=VALID_SYNC_PRESETS,
+        help="Preset do primeiro sync: yesterday, last7 ou custom",
+    )
+    parser.add_argument("--sync-from", help="Data inicial do primeiro sync (YYYY-MM-DD)")
+    parser.add_argument("--sync-to", help="Data final do primeiro sync (YYYY-MM-DD)")
+    parser.add_argument("--skip-mapping", action="store_true", help="Não validar mapeamento ao final")
+    parser.add_argument("--skip-initial-sync", action="store_true", help="Não gravar refresh-trigger.json")
     return parser.parse_args(argv)
 
 
@@ -476,8 +643,16 @@ def main(argv: list[str]) -> int:
 
     try:
         info = collect_user_info(args)
-        user_dir = install(info)
-        print_next_steps(info, user_dir)
+        user_dir, state_dir = install(info)
+
+        ekyte_cfg = read_json(state_dir / "ekyte-config.json", {})
+        user_cfg = read_json(state_dir / "user-config.json", {})
+        mapping_issues = [] if info.get("skip_mapping") else validate_mapping(ekyte_cfg, user_cfg)
+
+        print_next_steps(info, user_dir, mapping_issues)
+
+        if mapping_issues and not info.get("skip_mapping"):
+            return 2
         return 0
     except KeyboardInterrupt:
         print("\n\nInstalação cancelada pelo usuário.")

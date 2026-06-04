@@ -1,184 +1,168 @@
 ---
 name: todos-installer
 description: |
-  Instala e configura o Sistema de To-Dos Operacionais V2 para um novo usuário do time.
-  Cria o diretório People/{Nome}/, configura user-config.json, ekyte-config.json, gera o
-  dashboard inicial e valida a instalação. Use quando alguém do time quiser configurar
-  o sistema na própria máquina.
+  Instala e configura o Sistema de To-Dos Operacionais V2: estrutura local (Python) +
+  mapeamento Ekyte/Cockpit via MCP + primeiro sync. Use na instalação de novo player
+  ou quando mapping_status != complete.
 trigger:
   manual: /todos-installer
 mcps_required:
-  - Google Drive (opcional, para validar acesso)
-  - Google Calendar (opcional, para validar acesso)
-  - Ekyte (opcional, para validar workspace)
+  - ekyte
+  - cockpit
+  - Google Drive (sync)
+  - Google Calendar (sync)
 output_files:
-  - People/{Nome}/generate_dashboard.py
-  - People/{Nome}/todos-data.json
-  - People/{Nome}/todos-dashboard.html
-  - People/{Nome}/.todos/user-config.json
+  - People/{Nome}/.todos/mapeamento.md
   - People/{Nome}/.todos/ekyte-config.json
+  - People/{Nome}/.todos/user-config.json
+  - People/{Nome}/.todos/install-state.json
+  - People/{Nome}/.todos/refresh-trigger.json
 ---
 
-# /todos-installer — Instalação do Sistema de To-Dos V2
+# /todos-installer — Instalação completa (2 fases)
 
 ## Quando usar
 
-- Alguém do time quer instalar o sistema pela primeira vez
-- Reinstalação após trocar de máquina
-- Configurar para outro usuário ("instala para a Ana Souza, tráfego")
-- Atualizar o gerador (`generate_dashboard.py`) preservando dados locais
-
-## Pré-requisitos
-
-Antes de instalar, confirmar que:
-
-1. **Python 3.9+** instalado (`python3 --version`)
-2. **Claude Code** instalado com acesso ao repositório `skills_colli_co-main`
-3. **Repositório clonado** (ex.: `~/Documents/skills_colli_co-main`)
-4. **Template base presente:** `Sistema de to do/templates/base/generate_dashboard.py`
-5. **MCP configurado** — copiar `Sistema de to do/templates/mcp.example.json` para `mcp.json` na raiz do repo (ou `~/.claude/mcp.json`) e preencher tokens
-
-O instalador **não depende** da pasta `People/Jefferson Vieira`. O gerador vem do template neutro em `templates/base/`.
+- Primeiro player instalando o sistema
+- `install-state.json` com `mapping_status: pending`
+- `ekyte-config.json` com `workspaces: []`
+- Reinstalação pedindo atualização de mapeamento
 
 ---
 
-## Como executar o instalador
+## Fase A — Estrutura (Python)
 
-### Opção 1 — Interativa (recomendado)
-
-```bash
-cd skills_colli_co-main
-python3 "Sistema de to do/install_todos.py"
-```
-
-### Opção 2 — Com flags (sem interação)
+Rodar no repo:
 
 ```bash
 python3 "Sistema de to do/install_todos.py" \
-  --name "Ana Souza" \
-  --email "ana.souza@v4company.com" \
-  --role "gestor-trafego" \
-  --bu "Invictus" \
-  --squad "Invictus" \
+  --name "{Nome}" \
+  --email "{email}" \
+  --role "{role}" \
+  --bu "{bu}" \
+  --squad "{squad}" \
+  --sync-preset last7 \
   --yes
 ```
 
-Com `--yes` e diretório já existente: preserva `todos-data.json` e `.todos/ekyte-config.json`, atualiza `user-config.json` e o gerador, sem perguntas.
+Isso cria `People/{Nome}/`, `refresh-trigger.json`, `mapeamento.md` (esqueleto) e dashboard vazio.
 
-### Funções disponíveis (`--role`)
-
-| Valor | Descrição |
-|---|---|
-| `coordenador` | Coordenador de BU |
-| `gestor-projetos` | Gestor de projetos / atendimento |
-| `gestor-trafego` | Gestor de tráfego |
-| `copywriter` | Copywriter |
-| `designer` | Designer |
-| `social-media` | Social Media |
-| `dados-bi` | BI / Dados |
-| `atendimento-crm` | Atendimento / CRM |
-| `outro` | Outra função |
+**Exit code 2** = estrutura OK, mapeamento pendente → continuar Fase B.
 
 ---
 
-## O que o instalador cria
+## Fase B — Validação e mapeamento (MCP)
+
+### B0 — Carregar contexto
 
 ```
-People/{Nome do Usuário}/
-├── generate_dashboard.py       ← copiado de templates/base/
-├── todos-data.json             ← sprint atual (só se não existir)
-├── todos-dashboard.html        ← gerado automaticamente
-└── .todos/
-    ├── user-config.json        ← identidade + preferências (sempre atualizado)
-    ├── ekyte-config.json       ← workspaces (só se não existir)
-    ├── last-sync.json
-    ├── last-alerts.json
-    ├── ekyte-pending.json
-    ├── ekyte-errors.json
-    ├── refresh-errors.json
-    └── install-state.json
+Read: People/{Nome}/.todos/user-config.json
+Read: People/{Nome}/.todos/ekyte-config.json
+Read: People/{Nome}/.todos/install-state.json
+Read: People/{Nome}/.todos/refresh-trigger.json
+Read: People/{Nome}/.todos/mapeamento.md
 ```
 
-Cada usuário lê apenas arquivos em `People/{Nome}/` — paths relativos ao `BASE_DIR` do próprio `generate_dashboard.py`.
+Se `mapping_status == complete` e usuário não pediu refresh: validar apenas e reportar OK.
 
----
+### B1 — Perguntas (se necessário)
 
-## Como validar
+1. Confirmar BU/Squad (`user.bu`, `user.squad`)
+2. Workspace Ekyte padrão (lista numerada após busca MCP)
+3. Trimestre vigente para filtrar projetos (ex: Q2/2026)
+4. Confirmar range do primeiro sync (`refresh-trigger.json`)
 
-```bash
-python3 "People/{Nome}/generate_dashboard.py" --validate
-python3 "People/{Nome}/generate_dashboard.py" --keep-transcripts
-open "People/{Nome}/todos-dashboard.html"
-python3 "People/{Nome}/generate_dashboard.py" --serve --keep-transcripts
-```
+### B2 — MCP Ekyte
 
----
-
-## Como configurar MCP
-
-Na raiz do repositório (recomendado para o gerador local):
-
-```bash
-cp "Sistema de to do/templates/mcp.example.json" mcp.json
-# Editar mcp.json e substituir <PREENCHER_TOKEN_*>
-```
-
-O formato usa `npx supergateway` com `--streamableHttp` e `--header Authorization: Bearer ...`, compatível com `load_ekyte_mcp_config()` no gerador.
-
-**Não commitar** `mcp.json` — está no `.gitignore`.
-
-Opcional: copiar a skill para o Claude Code:
-
-```bash
-mkdir -p ~/.claude/skills/todos-installer
-cp "Sistema de to do/skills/todos-installer/SKILL.md" \
-   ~/.claude/skills/todos-installer/SKILL.md
-```
-
-Reinicie o Claude Code após alterar MCPs.
-
----
-
-## Como configurar Ekyte
-
-1. Editar `People/{Nome}/.todos/ekyte-config.json`
-2. Preencher `default_workspace_id`, `workspaces`, tipos de task
-3. Descobrir IDs: `/ekyte-refresh` no Claude Code
-4. Testar: botão **↑ Ekyte** no dashboard (com `--serve` ativo)
-
----
-
-## Diagnóstico de erros comuns
-
-| Erro | Causa | Solução |
+| Tool | Parâmetros | Objetivo |
 |---|---|---|
-| `generate_dashboard.py não encontrado` | Template base ausente | Verificar `Sistema de to do/templates/base/generate_dashboard.py` |
-| `Schema validation failed` | `todos-data.json` inválido | Rodar `--validate` e corrigir JSON |
-| `MCP Ekyte não encontrado` | `mcp.json` sem servidor `ekyte` | Copiar `mcp.example.json`, preencher token, reiniciar Claude |
-| `Port 8787 already in use` | Servidor já rodando | `kill $(lsof -ti:8787)` |
-| Dashboard vazio | Categorias erradas | Verificar `user-config.json → dashboard.categories` |
-| Instalador pede confirmação com `--yes` | Bug antigo | Usar versão atual do `install_todos.py` com `non_interactive` |
+| `list_short_workspaces` | `textSearch`: BU/squad, `active`: 1 | Workspaces |
+| `list_projects` | `workspaceId`, `active`: 1 | Projetos por workspace |
+| `list_task_types` | workflow Colli | Tipos de task |
+| `list_tags` | — | IDs de routine/week tags |
+
+Para cada workspace selecionado, popular em `ekyte-config.json`:
+
+```json
+{
+  "id": "112225",
+  "name": "[Invictus] ...",
+  "projects": [{"id": "216299", "name": "..."}],
+  "task_types": [{"id": "68301", "name": "..."}]
+}
+```
+
+**Sempre append** sentinelas `__other__` em workspaces, projects, task_types e assignees (ver template).
+
+Definir: `default_workspace_id`, `default_task_type_id`, `default_assignee_email`.
+
+### B3 — MCP Cockpit (time + projetos)
+
+Fonte principal de **pessoas do time**.
+
+```
+cockpit_query_table
+  filterByUser: documentId do coordenador (se conhecido)
+  filters: BU/squad conforme user-config
+```
+
+Extrair por projeto:
+- `documentId` → `user-config.cockpit.project_document_ids`
+- `ticker` → `user-config.cockpit.ticker_filter`
+- Coordenador / GT / e-mails → `ekyte-config.assignees`
+
+Incluir o próprio usuário instalado. Append `{ "id": "__other__", "name": "Outros (informar e-mail)", "is_other": true }`.
+
+### B4 — Gerar mapeamento.md
+
+Reescrever `People/{Nome}/.todos/mapeamento.md` com tabelas preenchidas:
+- Workspaces / Projetos / Tipos / Tags
+- Projetos Cockpit
+- Time Cockpit
+- Pendências manuais (Outros)
+
+### B5 — Persistir estado
+
+```json
+// install-state.json
+{
+  "mapping_status": "complete",
+  "mapped_at": "{ISO}",
+  "bu": "...",
+  "squad": "..."
+}
+```
 
 ---
 
-## Fluxo completo (Git)
+## Fase C — Primeiro sync + dedup
+
+1. Executar skill **todos-sync** (usa `refresh-trigger.json`)
+2. Executar skill **todos-dedup** (automático após sync)
+3. Regenerar dashboard:
 
 ```bash
-git clone <repo-url> skills_colli_co-main
-cd skills_colli_co-main
-
-cp "Sistema de to do/templates/mcp.example.json" mcp.json
-# preencher tokens no mcp.json
-
-mkdir -p ~/.claude/skills/todos-installer
-cp "Sistema de to do/skills/todos-installer/SKILL.md" \
-   ~/.claude/skills/todos-installer/SKILL.md
-
-python3 "Sistema de to do/install_todos.py" \
-  --name "Ana Souza" \
-  --email "ana.souza@v4company.com" \
-  --role "gestor-trafego" \
-  --yes
-
-python3 "People/Ana Souza/generate_dashboard.py" --serve --keep-transcripts
+python3 "People/{Nome}/generate_dashboard.py"
 ```
+
+4. Abrir `todos-dashboard.html` e confirmar items > 0
+
+---
+
+## Opção "Outros"
+
+Se ID não aparecer no MCP:
+1. Registrar em `mapeamento.md` → Pendências manuais
+2. Manter sentinel `__other__` no JSON
+3. Usuário preenche ID no modal Ekyte do dashboard
+
+---
+
+## Diagnóstico
+
+| Sintoma | Ação |
+|---|---|
+| workspaces vazio | Rodar Fase B |
+| Cockpit sem projetos | Verificar token + filtro BU |
+| Dashboard vazio após install | Rodar Fase C (`/atualiza-todos`) |
+| Exit code 2 do Python | Normal na 1ª vez — continuar Fase B |

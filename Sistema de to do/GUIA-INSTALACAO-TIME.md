@@ -38,7 +38,7 @@ Reinicie o Claude Code após salvar o MCP.
 
 ---
 
-## 2. Instalar o sistema
+## 2. Instalar o sistema (Fase A — Python)
 
 ```bash
 python3 "Sistema de to do/install_todos.py" \
@@ -47,23 +47,51 @@ python3 "Sistema de to do/install_todos.py" \
   --role "gestor-trafego" \
   --bu "Invictus" \
   --squad "Invictus" \
+  --sync-preset last7 \
   --yes
 ```
 
-Modo interativo (sem flags):
+Flags de sync:
+- `--sync-preset yesterday|last7|custom`
+- `--sync-from` / `--sync-to` (com `custom`)
+- `--skip-initial-sync` — não grava `refresh-trigger.json`
+- `--skip-mapping` — não exige mapeamento ao final (exit 0)
+
+O instalador grava `.todos/refresh-trigger.json` com o range do **primeiro sync** e cria `.todos/mapeamento.md` (esqueleto).
+
+**Exit code 2** = estrutura OK, mapeamento pendente → continuar Fase B.
+
+Modo interativo (pergunta range + integrações):
 
 ```bash
 python3 "Sistema de to do/install_todos.py"
 ```
 
-O instalador pergunta nome, e-mail, BU, função e integrações.
+---
 
-**Reinstalação / atualização** (mesmo comando com `--yes`):
+## 2b. Mapeamento Ekyte + Cockpit (Fase B — Claude)
 
-- Preserva `todos-data.json`
-- Preserva `.todos/ekyte-config.json`
-- Atualiza `user-config.json` e `generate_dashboard.py`
-- Não pede confirmação no modo `--yes`
+Copie as skills para o Claude Code:
+
+```bash
+for s in todos-installer todos-sync atualiza-todos todos-dedup; do
+  mkdir -p ~/.claude/skills/$s
+  cp "Sistema de to do/skills/$s/SKILL.md" ~/.claude/skills/$s/SKILL.md
+done
+```
+
+No Claude Code:
+
+```
+/todos-installer
+```
+
+A Fase B vai:
+1. Buscar workspaces e projetos no MCP **Ekyte**
+2. Buscar projetos e **time** no MCP **Cockpit**
+3. Preencher `ekyte-config.json`, `user-config.json` e `mapeamento.md`
+4. Rodar primeiro `/atualiza-todos` (usa o range do `refresh-trigger.json`)
+5. Desduplicar tasks automaticamente
 
 ---
 
@@ -91,12 +119,11 @@ python3 "People/Ana Souza/generate_dashboard.py" --validate
 
 ## 4. Configurar Ekyte
 
-Edite `People/{Seu Nome}/.todos/ekyte-config.json`:
+Preferencial: deixar a **Fase B** do `/todos-installer` preencher via MCP.
 
-- `default_workspace_id`
-- `workspaces` com projetos e tipos de task
+Manual: edite `People/{Seu Nome}/.todos/ekyte-config.json` e consulte `mapeamento.md`.
 
-Descobrir IDs: `/ekyte-refresh` no Claude Code.
+Opção **Outros**: nos selects do modal Ekyte, escolha "Outros (informar ID)" e digite o ID/e-mail manualmente.
 
 ---
 
@@ -143,7 +170,10 @@ Não commite pastas em `People/{Nome}/`.
 | `People/{Nome}/generate_dashboard.py` | Gerador + servidor local |
 | `People/{Nome}/todos-data.json` | Fonte de verdade dos to-dos |
 | `People/{Nome}/.todos/user-config.json` | Identidade e categorias |
-| `People/{Nome}/.todos/ekyte-config.json` | Workspaces Ekyte |
+| `People/{Nome}/.todos/ekyte-config.json` | Workspaces, projetos, assignees Ekyte |
+| `People/{Nome}/.todos/mapeamento.md` | Documento de mapeamento Ekyte + Cockpit |
+| `People/{Nome}/.todos/refresh-trigger.json` | Range do primeiro sync |
+| `People/{Nome}/.todos/install-state.json` | `mapping_status`: pending \| complete |
 | `mcp.json` (raiz do repo) | Tokens MCP — **local, ignorado pelo Git** |
 | `Sistema de to do/backups/` | Backups locais — **ignorado pelo Git** |
 | `Sistema de to do/templates/base/` | Template neutro do gerador |

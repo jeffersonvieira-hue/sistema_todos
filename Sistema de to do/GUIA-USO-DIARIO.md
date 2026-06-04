@@ -20,23 +20,22 @@ No Claude Code:
 ```
 
 O sistema vai:
-1. Ler as transcrições das suas reuniões de ontem (ou do período configurado)
+1. Ler as transcrições das suas reuniões (range do `refresh-trigger.json` ou padrão)
 2. Extrair tasks com seu nome como owner
-3. Criar alertas de projetos com score crítico (se Cockpit habilitado)
-4. Atualizar o dashboard automaticamente
+3. **Desduplicar** automaticamente (`todos-dedup` após cada sync)
+4. Criar alertas de projetos (se Cockpit habilitado)
+5. Regenerar o dashboard
 
 ---
 
 ## Abrir o dashboard
 
 ```bash
-# Arquivo estático (rápido, sem Ekyte)
 open "People/{Seu Nome}/todos-dashboard.html"
-
-# Com servidor local (para criar tasks no Ekyte)
 python3 "People/{Seu Nome}/generate_dashboard.py" --serve
-# Acesse: http://127.0.0.1:8787
 ```
+
+Acesse: `http://127.0.0.1:8787` (servidor local necessário para Ekyte gravar em disco).
 
 ---
 
@@ -44,85 +43,41 @@ python3 "People/{Seu Nome}/generate_dashboard.py" --serve
 
 1. Clique no checkbox da task
 2. O modal de conclusão abre
-3. Opções:
-   - **Cancelar** — fecha sem concluir
-   - **Concluir sem nota** — conclui direto
-   - **Concluir** — salva uma anotação antes de concluir
+3. Opções: **Cancelar**, **Concluir sem nota**, **Concluir** (com anotação)
 4. Marque **Follow** se quiser acompanhar depois de concluída
 
-**Esc** ou clicar fora do modal = Cancelar (não conclui).
+**Esc** ou clicar fora = Cancelar (não conclui).
 
 ---
 
 ## Usar o Follow
 
-Tasks marcadas como Follow aparecem na aba **Follow** do dashboard.
+Tasks em Follow aparecem no chip **Follow**.
 
-Use para tasks que:
-- Dependem de outra pessoa
-- Você quer checar resultado depois
-- São decisões que merecem acompanhamento
+**Concluir follow:** clique em **Concluir follow** na aba Follow para remover do radar. Opcionalmente adicione nota final (vai para o histórico da task).
 
 ---
 
 ## Ver histórico
 
-Clique no chip **Histórico** no dashboard.
-
-Mostra todas as tasks concluídas, agrupadas por mês, com:
-- Título e categoria original
-- Fonte (qual reunião gerou)
-- Data de conclusão
-- Anotação, se houver
+Clique no chip **Histórico**. Mostra tasks concluídas por mês, com fonte, data e anotações.
 
 ---
 
 ## Adicionar task manualmente
 
-No dashboard, clique em **+ Task** no topo.
-
-Preencha:
-- Categoria
-- Título
-- Prioridade e Confiança
-- Contexto (opcional)
-- Fonte (opcional)
+Clique em **+ Task** no topo do dashboard.
 
 ---
 
 ## Subir task para o Ekyte
 
-No card da task, clique em **↑ Ekyte**.
-
-O sistema vai:
-1. Criar a task no Ekyte com seu workspace, projeto e tipo configurados
-2. Marcar a task no dashboard como `✓ Ekyte #ID`
-3. Abrir o link direto para a task no Ekyte
-
-Se o servidor local não estiver rodando, o sistema salva na fila e você pode processar depois com `/todos-promote-ekaite`.
+Clique em **↑ Ekyte** no card. Use **Outros (informar ID)** se workspace/projeto não estiver listado.
 
 ---
 
-## Filtros do dashboard
+## Filtros e busca
 
-| Chip / Card | O que mostra |
-|---|---|
-| **Todos** | Todos os itens da sprint |
-| **Abertos** | Só tasks não concluídas |
-| **Urgentes** | Tasks com prioridade urgente |
-| **Verificar** | Tasks marcadas `review_needed` |
-| **Alertas** | Alertas críticos de projetos |
-| **Follow** | Tasks marcadas para acompanhamento |
-| **Histórico** | Todas as tasks concluídas |
+Chips: Todos, Abertos, Urgentes, Verificar, Alertas, Follow, Histórico.
 
-Clique em qualquer categoria no chip de categorias para filtrar por cliente/área.
-
----
-
-## Busca
-
-Use a barra de busca no topo para encontrar tasks por:
-- Título
-- Contexto
-- Fonte (nome da reunião)
-- Anotação de conclusão
+Busca por título, contexto, fonte ou anotação.

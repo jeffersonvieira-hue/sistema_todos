@@ -1735,6 +1735,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .follow-card-title { font-size: 13px; font-weight: 680; line-height: 1.35; overflow-wrap: anywhere; }
   .follow-card-meta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 5px; font-size: 10px; color: var(--muted); }
   .follow-card-note { margin-top: 7px; padding: 5px 8px; border-left: 2px solid rgba(62,130,245,.38); background: rgba(62,130,245,.07); color: #c4e4ff; font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+  .follow-card-actions { display: flex; gap: 6px; margin-top: 9px; flex-wrap: wrap; }
+  .ekyte-other-field { margin-top: 5px; }
+  .ekyte-other-field.hidden { display: none; }
   /* System strip */
   .system-strip { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px; padding: 9px 13px; border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--panel-soft); font-size: 11px; color: var(--muted); }
   .sys-item strong { color: var(--text); margin-left: 3px; }
@@ -1935,6 +1938,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
+<div class="modal-backdrop hidden" id="followDismissModal" role="dialog" aria-modal="true" aria-labelledby="followDismissTitle">
+  <div class="modal-card">
+    <div class="modal-title" id="followDismissTitle">Concluir follow</div>
+    <div class="modal-task" id="followDismissTaskTitle"></div>
+    <textarea id="followDismissNote" placeholder="Nota final opcional antes de remover do radar."></textarea>
+    <div class="modal-actions">
+      <button class="btn" id="followDismissCancelBtn" type="button">Cancelar</button>
+      <button class="btn" id="followDismissSkipBtn" type="button">Remover sem nota</button>
+      <button class="btn primary" id="followDismissSaveBtn" type="button">Concluir follow</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop hidden" id="ekyteModal" role="dialog" aria-modal="true" aria-labelledby="ekyteModalTitle">
   <div class="modal-card wide">
     <div class="modal-title" id="ekyteModalTitle">Subir task no Ekyte</div>
@@ -1943,18 +1959,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="field">
         <label for="ekyteWorkspace">Workspace</label>
         <select id="ekyteWorkspace"></select>
+        <input class="ekyte-other-field hidden" id="ekyteWorkspaceOther" type="text" placeholder="ID do workspace">
       </div>
       <div class="field">
         <label for="ekyteProject">Projeto</label>
         <select id="ekyteProject"></select>
+        <input class="ekyte-other-field hidden" id="ekyteProjectOther" type="text" placeholder="ID do projeto">
       </div>
       <div class="field">
         <label for="ekyteTaskType">Tipo de task</label>
         <select id="ekyteTaskType"></select>
+        <input class="ekyte-other-field hidden" id="ekyteTaskTypeOther" type="text" placeholder="ID do tipo de task">
       </div>
       <div class="field">
         <label for="ekyteAssignee">Responsável</label>
         <select id="ekyteAssignee"></select>
+        <input class="ekyte-other-field hidden" id="ekyteAssigneeOther" type="email" placeholder="e-mail do responsável">
       </div>
       <div class="field">
         <label for="ekyteDue">Prazo</label>
@@ -2033,6 +2053,42 @@ function esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => escMap[c]); }
 function attr(v) { return esc(v).replace(/`/g,'&#96;'); }
 function allItems() { return sprint.categories.flatMap(c => c.items.map(i => ({category:c, item:i}))); }
 function rows(v) { return Array.isArray(v) ? v : []; }
+const OTHER_ID = '__other__';
+const OTHER_OPTION = {id: OTHER_ID, name: 'Outros (informar ID)', is_other: true};
+const OTHER_EMAIL_OPTION = {id: OTHER_ID, name: 'Outros (informar e-mail)', email: '', is_other: true};
+function withOtherOptions(list, emailField=false) {
+  const base = rows(list).filter(r => !r.is_other && r.id !== OTHER_ID);
+  return [...base, emailField ? OTHER_EMAIL_OPTION : OTHER_OPTION];
+}
+function toggleEkyteOtherFields() {
+  const pairs = [
+    ['ekyteWorkspace','ekyteWorkspaceOther'],
+    ['ekyteProject','ekyteProjectOther'],
+    ['ekyteTaskType','ekyteTaskTypeOther'],
+    ['ekyteAssignee','ekyteAssigneeOther'],
+  ];
+  pairs.forEach(([selId, inpId]) => {
+    const inp = $(inpId);
+    if (!inp) return;
+    const show = $(selId)?.value === OTHER_ID;
+    inp.classList.toggle('hidden', !show);
+  });
+}
+function resolveSelectValue(selectId, otherInputId) {
+  const sel = $(selectId);
+  if (!sel) return '';
+  if (sel.value === OTHER_ID) return String($(otherInputId)?.value || '').trim();
+  return sel.value || '';
+}
+function resolveSelectLabel(selectId, otherInputId) {
+  const sel = $(selectId);
+  if (!sel) return '';
+  if (sel.value === OTHER_ID) {
+    const manual = String($(otherInputId)?.value || '').trim();
+    return manual ? `Outros: ${manual}` : 'Outros';
+  }
+  return selectedLabel(selectId);
+}
 function sameId(a,b) { return String(a ?? '') === String(b ?? ''); }
 function norm(v) { return String(v||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
 function byId(list, id) { return rows(list).find(r => sameId(r.id,id)); }
@@ -2144,6 +2200,45 @@ function setDone(id, value) {
 }
 function saveTaskHistory() { localStorage.setItem(historyKey, JSON.stringify(taskHistory)); }
 function saveFollowList() { localStorage.setItem(followKey, JSON.stringify(followList)); }
+function removeFromFollow(itemId) {
+  const before = followList.length;
+  followList = followList.filter(f => f.item_id !== itemId);
+  if (followList.length !== before) saveFollowList();
+}
+let pendingFollowDismiss = null;
+function openFollowDismiss(followEntry) {
+  pendingFollowDismiss = followEntry;
+  $('followDismissTaskTitle').textContent = followEntry.title || '';
+  $('followDismissNote').value = '';
+  $('followDismissModal').classList.remove('hidden');
+  setTimeout(() => $('followDismissNote').focus(), 30);
+}
+function cancelFollowDismiss() {
+  pendingFollowDismiss = null;
+  $('followDismissModal').classList.add('hidden');
+}
+function finishFollowDismiss(withNote) {
+  if (!pendingFollowDismiss) return;
+  const note = withNote ? $('followDismissNote').value.trim() : '';
+  const itemId = pendingFollowDismiss.item_id;
+  if (note && itemId) {
+    if (!Array.isArray(taskHistory[itemId])) taskHistory[itemId] = [];
+    taskHistory[itemId].push({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      at: new Date().toISOString(), status: 'follow_done', note,
+      title: pendingFollowDismiss.title || '',
+      source: pendingFollowDismiss.source || '',
+      category_id: pendingFollowDismiss.category_id || '',
+      category_name: pendingFollowDismiss.category_name || '',
+    });
+    saveTaskHistory();
+  }
+  removeFromFollow(itemId);
+  pendingFollowDismiss = null;
+  $('followDismissModal').classList.add('hidden');
+  render();
+  showToast(note ? 'Follow concluído com nota' : 'Follow concluído', 'ok');
+}
 function addToFollow(entry, note) {
   const {category, item} = entry;
   if (followList.some(f => f.item_id === item.id)) return;
@@ -2441,10 +2536,13 @@ function renderFollowView() {
   const q = filters.query.toLowerCase();
   const items = [...followList].reverse().filter(f => !q || ['title','note','source','category_name'].some(k => f[k] && String(f[k]).toLowerCase().includes(q)));
   if (!items.length) { view.innerHTML=`<div class="empty-state">Nenhuma task em Follow${q?' para esta busca':''}.</div>`; return; }
-  view.innerHTML = items.map(f=>`<div class="follow-card">
+  view.innerHTML = items.map(f=>`<div class="follow-card" data-follow-id="${attr(f.item_id)}">
   <div class="follow-card-title">${esc(f.title||'-')}</div>
   <div class="follow-card-meta"><span>${esc(f.category_name||f.category_id||'-')}</span>${f.source?`<span>·</span><span>${esc(f.source)}</span>`:''}${f.completed_at?`<span>·</span><span>Concluída ${esc(fmtDate(f.completed_at))}</span>`:''}</div>
   ${f.note?`<div class="follow-card-note">${esc(f.note)}</div>`:''}
+  <div class="follow-card-actions">
+    <button class="btn primary" type="button" data-follow-done="${attr(f.item_id)}">Concluir follow</button>
+  </div>
 </div>`).join('');
 }
 function renderSystemStrip() {
@@ -2586,18 +2684,23 @@ async function tryWriteQueue(queue) {
 function fillSelect(selectId, list, selectedValue, emptyLabel='') {
   const empty = emptyLabel ? option('', emptyLabel, !selectedValue) : '';
   $(selectId).innerHTML = empty + rows(list).map(row => option(row.id ?? row.name, row.name || row.email || row.id, sameId(row.id ?? row.name, selectedValue), row.id?` data-id="${attr(row.id)}"`:'')).join('');
+  toggleEkyteOtherFields();
 }
 function refreshEkyteProjectAndType(draft={}) {
-  const workspaceId = $('ekyteWorkspace').value;
-  fillSelect('ekyteProject', projectsForWorkspace(workspaceId), draft.project_id || defaultProjectId(workspaceId), 'Selecione');
-  fillSelect('ekyteTaskType', taskTypesForWorkspace(workspaceId), draft.task_type_id || defaultTaskTypeId(workspaceId), 'Selecione');
+  const workspaceId = $('ekyteWorkspace').value === OTHER_ID
+    ? resolveSelectValue('ekyteWorkspace', 'ekyteWorkspaceOther')
+    : $('ekyteWorkspace').value;
+  const projects = withOtherOptions(projectsForWorkspace(workspaceId));
+  const types = withOtherOptions(taskTypesForWorkspace(workspaceId));
+  fillSelect('ekyteProject', projects, draft.project_id || defaultProjectId(workspaceId), 'Selecione');
+  fillSelect('ekyteTaskType', types, draft.task_type_id || defaultTaskTypeId(workspaceId), 'Selecione');
   updateEkyteCreateState();
 }
 function fillEkyteModal(entry, draft) {
   $('ekyteTaskTitle').textContent = draft.title || entry.item.title || '';
-  fillSelect('ekyteWorkspace', workspaceRows(), draft.workspace_id || defaultWorkspaceId(), 'Selecione');
+  fillSelect('ekyteWorkspace', withOtherOptions(EKYTE_CONFIG.workspaces), draft.workspace_id || defaultWorkspaceId(), 'Selecione');
   refreshEkyteProjectAndType(draft);
-  const assignees = assigneeRows().map(a=>({id:a.email,name:`${a.name || a.email}${a.role?` · ${a.role}`:''}`}));
+  const assignees = withOtherOptions(assigneeRows(), true).map(a=>({id:a.email || a.id,name:`${a.name || a.email || a.id}${a.role?` · ${a.role}`:''}`}));
   fillSelect('ekyteAssignee', assignees, draft.assignee_email || defaultAssigneeEmail(), 'Selecione');
   const routineOptions = routineTagRows().map(t=>({id:t.name,name:t.name, tagId:t.id||''}));
   $('ekyteRoutineTag').innerHTML = option('', 'Selecione', !draft.routine_tag_name) + routineOptions.map(t=>option(t.id,t.name,norm(t.name)===norm(draft.routine_tag_name),` data-id="${attr(t.tagId)}"`)).join('');
@@ -2610,16 +2713,20 @@ function fillEkyteModal(entry, draft) {
   updateEkyteCreateState();
 }
 function currentEkytePayload() {
+  const workspaceId = resolveSelectValue('ekyteWorkspace', 'ekyteWorkspaceOther');
+  const projectId = resolveSelectValue('ekyteProject', 'ekyteProjectOther');
+  const taskTypeId = resolveSelectValue('ekyteTaskType', 'ekyteTaskTypeOther');
+  const assigneeEmail = resolveSelectValue('ekyteAssignee', 'ekyteAssigneeOther');
   return {
     item_id: pendingEkyte?.item?.id || '',
-    workspace_id: $('ekyteWorkspace').value,
-    workspace_label: selectedLabel('ekyteWorkspace'),
-    project_id: $('ekyteProject').value,
-    project_name: selectedLabel('ekyteProject'),
-    task_type_id: $('ekyteTaskType').value,
-    task_type_name: selectedLabel('ekyteTaskType'),
-    assignee_email: $('ekyteAssignee').value,
-    assignee_name: selectedLabel('ekyteAssignee').split(' · ')[0],
+    workspace_id: workspaceId,
+    workspace_label: resolveSelectLabel('ekyteWorkspace', 'ekyteWorkspaceOther'),
+    project_id: projectId,
+    project_name: resolveSelectLabel('ekyteProject', 'ekyteProjectOther'),
+    task_type_id: taskTypeId,
+    task_type_name: resolveSelectLabel('ekyteTaskType', 'ekyteTaskTypeOther'),
+    assignee_email: assigneeEmail,
+    assignee_name: resolveSelectLabel('ekyteAssignee', 'ekyteAssigneeOther').split(' · ')[0],
     due_date: $('ekyteDue').value,
     meeting_date: $('ekyteMeetingDate').value,
     routine_tag_name: $('ekyteRoutineTag').value,
@@ -2837,6 +2944,16 @@ document.addEventListener('click', e => {
   if (e.target.id==='completionSkipBtn') { finishCompletion(false); return; }
   if (e.target.id==='completionSaveBtn') { finishCompletion(true); return; }
   if (e.target.id==='completionModal') { cancelCompletion(); return; }
+  if (e.target.dataset.followDone) {
+    const fid = e.target.dataset.followDone;
+    const entry = followList.find(f => f.item_id === fid);
+    if (entry) openFollowDismiss(entry);
+    return;
+  }
+  if (e.target.id==='followDismissCancelBtn') { cancelFollowDismiss(); return; }
+  if (e.target.id==='followDismissSkipBtn') { finishFollowDismiss(false); return; }
+  if (e.target.id==='followDismissSaveBtn') { finishFollowDismiss(true); return; }
+  if (e.target.id==='followDismissModal') { cancelFollowDismiss(); return; }
   if (e.target.id==='retryForceBtn') {
     const t=SYSTEM_STATE.refresh_trigger||{};
     if(t.from) $('refreshFrom').value=t.from;
@@ -2847,7 +2964,8 @@ document.addEventListener('click', e => {
 $('searchInput').addEventListener('input', e => { filters.query=e.target.value.trim(); renderCategories(); renderHistoryView(); renderFollowView(); });
 document.addEventListener('keydown', e => {
   if(e.key!=='Escape') return;
-  if(!$('completionModal').classList.contains('hidden')) cancelCompletion();
+  if(!$('followDismissModal').classList.contains('hidden')) cancelFollowDismiss();
+  else if(!$('completionModal').classList.contains('hidden')) cancelCompletion();
   else if(!$('ekyteModal').classList.contains('hidden')) closeEkyteModal();
   else if(!$('ekyteFlushModal').classList.contains('hidden')) closeEkyteFlushModal();
 });
@@ -2858,6 +2976,7 @@ $('refreshToggleBtn').addEventListener('click', () => $('refreshPanel').classLis
 $('refreshPreset').addEventListener('change', setPresetDates);
 $('createTriggerBtn').addEventListener('click', () => createTrigger(false));
 $('ekyteWorkspace').addEventListener('change', () => refreshEkyteProjectAndType());
+['ekyteWorkspace','ekyteProject','ekyteTaskType','ekyteAssignee'].forEach(id => $(id).addEventListener('change', toggleEkyteOtherFields));
 ['ekyteProject','ekyteTaskType','ekyteAssignee','ekyteDue','ekyteMeetingDate','ekyteRoutineTag','ekyteWeekTag'].forEach(id => $(id).addEventListener('change', updateEkyteCreateState));
 $('ekyteMeetingDate').addEventListener('change', () => {
   if (!$('ekyteWeekTag').value) $('ekyteWeekTag').value = weekTagForClient($('ekyteMeetingDate').value);

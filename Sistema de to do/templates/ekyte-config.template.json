@@ -9,9 +9,22 @@
       "name": "{{FULL_NAME}}",
       "email": "{{EMAIL}}",
       "role": "{{ROLE_LABEL}}"
+    },
+    {
+      "id": "__other__",
+      "name": "Outros (informar e-mail)",
+      "email": "",
+      "role": "",
+      "is_other": true
     }
   ],
-  "task_types": [],
+  "task_types": [
+    {
+      "id": "__other__",
+      "name": "Outros (informar ID)",
+      "is_other": true
+    }
+  ],
   "routine_tags": [
     {"name": "AÇÃO GERENCIAL", "id": null},
     {"name": "SPRINT GROWTH", "id": null},
@@ -47,5 +60,9 @@
     {"name": "SEMANA 47", "id": null}, {"name": "SEMANA 48", "id": null},
     {"name": "SEMANA 49", "id": null}, {"name": "SEMANA 50", "id": null},
     {"name": "SEMANA 51", "id": null}, {"name": "SEMANA 52", "id": null}
-  ]
+  ],
+  "_other_sentinel": {
+    "workspace": {"id": "__other__", "name": "Outros (informar ID)", "is_other": true, "projects": [{"id": "__other__", "name": "Outros (informar ID)", "is_other": true}], "task_types": [{"id": "__other__", "name": "Outros (informar ID)", "is_other": true}]},
+    "note": "Ao popular workspaces via MCP, append o sentinel em workspaces, projects e task_types quando aplicável."
+  }
 }
