@@ -2,7 +2,27 @@
 
 Sistema instalável para qualquer pessoa do time Colli&Co / V4. Cada usuário tem sua pasta em `People/{Nome}/` com gerador, JSON de to-dos e dashboard HTML.
 
-**Novos usuários não dependem de nenhuma pasta pessoal já existente** — o instalador cópia o gerador de `templates/base/`.
+---
+
+## Acabou de clonar ou deu `git pull`?
+
+**Rode no Claude Code:**
+
+```
+/todos-installer
+```
+
+Script de lembrete (opcional):
+
+```bash
+bash "Sistema de to do/scripts/pos-pull.sh"
+```
+
+Na 1ª vez, copie as skills antes (detalhes no [guia de instalação](GUIA-INSTALACAO-TIME.md)).
+
+---
+
+**Novos usuários não dependem de nenhuma pasta pessoal já existente** — o instalador copia o gerador de `templates/base/`.
 
 ## Como funciona a pasta People
 

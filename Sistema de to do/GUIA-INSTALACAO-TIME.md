@@ -1,6 +1,24 @@
 # Guia de Instalação — Sistema de To-Dos Operacionais V2
 
-Instalação para qualquer pessoa do time. Cada usuário trabalha em `People/{Nome}/`. A V1 do Jefferson **não é dependência** do instalador — o gerador vem de `Sistema de to do/templates/base/generate_dashboard.py`.
+Instalação para qualquer pessoa do time. Cada usuário trabalha em `People/{Nome}/`.
+
+---
+
+## Você acabou de clonar ou deu `git pull`?
+
+Abra o Claude Code na pasta do repo e rode:
+
+```
+/todos-installer
+```
+
+Ou execute o lembrete no terminal:
+
+```bash
+bash "Sistema de to do/scripts/pos-pull.sh"
+```
+
+---
 
 ## Requisitos
 
