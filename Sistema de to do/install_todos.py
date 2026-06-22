@@ -31,6 +31,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 PEOPLE_DIR = BASE_DIR / "People"
 GENERATOR_SOURCE = TEMPLATES_DIR / "base" / "generate_dashboard.py"
+AUTO_SYNC_SOURCE = TEMPLATES_DIR / "base" / "auto_sync.py"
+OAUTH_SOURCE = TEMPLATES_DIR / "base" / "setup_google_oauth.py"
 
 VALID_ROLES = [
     "coordenador",
@@ -273,6 +275,10 @@ def check_prerequisites() -> list[str]:
     issues = []
     if not GENERATOR_SOURCE.exists():
         issues.append(f"generate_dashboard.py não encontrado em: {GENERATOR_SOURCE}")
+    if not AUTO_SYNC_SOURCE.exists():
+        issues.append(f"auto_sync.py não encontrado em: {AUTO_SYNC_SOURCE}")
+    if not OAUTH_SOURCE.exists():
+        issues.append(f"setup_google_oauth.py não encontrado em: {OAUTH_SOURCE}")
     if not TEMPLATES_DIR.exists():
         issues.append(f"Pasta de templates não encontrada: {TEMPLATES_DIR}")
     if sys.version_info < (3, 9):
@@ -472,10 +478,14 @@ def install(info: dict) -> Path:
     user_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Copy generate_dashboard.py
+    # 1. Copy runtime scripts
     dest_generator = user_dir / "generate_dashboard.py"
     shutil.copy2(GENERATOR_SOURCE, dest_generator)
     print(f"  ✓ generate_dashboard.py copiado")
+    shutil.copy2(AUTO_SYNC_SOURCE, user_dir / "auto_sync.py")
+    print(f"  ✓ auto_sync.py copiado")
+    shutil.copy2(OAUTH_SOURCE, user_dir / "setup_google_oauth.py")
+    print(f"  ✓ setup_google_oauth.py copiado")
 
     # 2. todos-data.json (only if not exists)
     todos_data_path = user_dir / "todos-data.json"
@@ -584,19 +594,22 @@ PRÓXIMOS PASSOS:
 2. Subir o servidor local (para criar tasks no Ekyte):
    python3 "{user_dir}/generate_dashboard.py" --serve
 
-3. Se ainda não configurou o MCP, copie:
+3. Ativar atualização automática a cada 2 horas (segunda a sexta):
+   python3 "Sistema de to do/install_automation.py" --name "{info['full_name']}"
+
+4. Se ainda não configurou o MCP, copie:
    cp "Sistema de to do/templates/mcp.example.json" ~/.claude/mcp.json
    (edite com seus tokens reais)
 
-4. Configurar Ekyte (se habilitado):
+5. Configurar Ekyte (se habilitado):
    Edite: {user_dir}/.todos/ekyte-config.json
    Preencha: workspaces, projetos e tipos de task reais.
 
-5. Mapeamento Ekyte + Cockpit (obrigatório na 1ª vez):
+6. Mapeamento Ekyte + Cockpit (obrigatório na 1ª vez):
    /todos-installer
    (Fase B: busca workspaces, projetos e time no MCP)
 
-6. Primeiro sync de reuniões (usa o range gravado em refresh-trigger.json):
+7. Primeiro sync de reuniões (usa o range gravado em refresh-trigger.json):
    /atualiza-todos
 """)
     if mapping_issues:

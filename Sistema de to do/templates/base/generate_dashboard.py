@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate and optionally serve Jefferson Vieira's personal todos dashboard.
+Generate and optionally serve a personal todos dashboard.
 
 The JSON file is the source of truth. This script validates it before writing
 the self-contained HTML dashboard, so Pipeline A/B can call one stable command
@@ -15,6 +15,7 @@ import json
 import os
 import posixpath
 import re
+import subprocess
 import sys
 import time
 import unicodedata
@@ -47,6 +48,10 @@ LAST_ALERTS_PATH = STATE_DIR / "last-alerts.json"
 EKYTE_PENDING_PATH = STATE_DIR / "ekyte-pending.json"
 EKYTE_CONFIG_PATH = STATE_DIR / "ekyte-config.json"
 EKYTE_ERRORS_PATH = STATE_DIR / "ekyte-errors.json"
+MEETING_SYNC_LOG_PATH = STATE_DIR / "meeting-sync-log.json"
+AUTO_SYNC_STATUS_PATH = STATE_DIR / "auto-sync-status.json"
+AUTO_SYNC_ERRORS_PATH = STATE_DIR / "auto-sync-errors.json"
+AUTO_SYNC_SCRIPT_PATH = BASE_DIR / "auto_sync.py"
 USER_CONFIG_PATH = STATE_DIR / "user-config.json"
 
 _user_config_cache: Optional[Dict[str, Any]] = None
@@ -67,13 +72,13 @@ def user_default_email() -> str:
     return (
         cfg.get("user", {}).get("email")
         or cfg.get("ekyte", {}).get("default_assignee_email")
-        or "jefferson.vieira@v4company.com"
+        or "usuario@empresa.com"
     )
 
 
 def user_full_name() -> str:
     cfg = load_user_config()
-    return cfg.get("user", {}).get("full_name") or "Jefferson Vieira"
+    return cfg.get("user", {}).get("full_name") or "Usuário"
 
 
 def user_workspace_label() -> str:
@@ -83,9 +88,13 @@ def user_workspace_label() -> str:
     role = user.get("role", "")
     if name:
         return f"Coord. {name}" if "coord" in role.lower() else name
-    return "Coord. Jefferson Vieira"
+    return "Usuário"
 CLEANUP_LOG_PATH = STATE_DIR / "cleanup-log.jsonl"
-MCP_CONFIG_PATH = REPO_DIR / "mcp.json"
+MCP_CONFIG_PATH = (
+    BASE_DIR / "mcp.json"
+    if (BASE_DIR / "mcp.json").exists()
+    else REPO_DIR / "mcp.json"
+)
 VALID_PRIORITIES = {"urgente", "normal", "recorrente"}
 VALID_CONFIDENCES = {"alta", "média", "media", "baixa"}
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -117,6 +126,26 @@ def read_json(path: Path, default: Any = None) -> Any:
 def read_json_list(path: Path) -> List[Any]:
     payload = read_json(path, [])
     return payload if isinstance(payload, list) else []
+
+
+def empty_meeting_sync_log() -> Dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "summary": {},
+        "events": [],
+    }
+
+
+def read_meeting_sync_log() -> Dict[str, Any]:
+    payload = read_json(MEETING_SYNC_LOG_PATH, empty_meeting_sync_log())
+    if not isinstance(payload, dict):
+        return empty_meeting_sync_log()
+    payload.setdefault("schema_version", "1.0")
+    if not isinstance(payload.get("summary"), dict):
+        payload["summary"] = {}
+    if not isinstance(payload.get("events"), list):
+        payload["events"] = []
+    return payload
 
 
 def write_json_atomic(path: Path, payload: Any) -> None:
@@ -317,6 +346,9 @@ def build_system_state() -> Dict[str, Any]:
         "ekyte_pending": read_ekyte_pending_normalized(),
         "ekyte_errors": read_json(EKYTE_ERRORS_PATH, []),
         "ekyte_config": ekyte_config,
+        "meeting_sync_log": read_meeting_sync_log(),
+        "auto_sync_status": read_json(AUTO_SYNC_STATUS_PATH, None),
+        "auto_sync_errors": read_json(AUTO_SYNC_ERRORS_PATH, []),
         "last_sync": read_json(LAST_SYNC_PATH, None),
         "last_alerts": read_json(LAST_ALERTS_PATH, None),
     }
@@ -1048,7 +1080,7 @@ def render_dashboard(data: Dict[str, Any], system_state: Dict[str, Any]) -> str:
     owner = html.escape(str(
         data.get("meta", {}).get("owner")
         or user_cfg.get("user", {}).get("full_name")
-        or "Jefferson Vieira"
+        or "Usuário"
     ))
     sprint_key = html.escape(str(data.get("meta", {}).get("currentSprint", "")))
     title = f"Todos — {owner}"
@@ -1142,6 +1174,9 @@ class TodosHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/status":
             self.send_json({"ok": True, "state": build_system_state()})
             return
+        if parsed.path == "/api/events":
+            self.handle_events()
+            return
         if parsed.path in {"/", ""}:
             self.path = "/todos-dashboard.html"
         super().do_GET()
@@ -1195,10 +1230,96 @@ class TodosHandler(SimpleHTTPRequestHandler):
                 "requested_at": now_br(),
             }
             write_json_atomic(TRIGGER_PATH, trigger)
-            generate_dashboard(quiet=True)
-            self.send_json({"ok": True, "trigger": trigger, "path": str(TRIGGER_PATH)})
+
+            if not AUTO_SYNC_SCRIPT_PATH.exists():
+                raise ValueError(f"Sincronizador não encontrado: {AUTO_SYNC_SCRIPT_PATH}")
+
+            command = [
+                sys.executable,
+                str(AUTO_SYNC_SCRIPT_PATH),
+                "--from",
+                from_date,
+                "--to",
+                to_date,
+                "--max-files",
+                "0",
+            ]
+            if trigger["force_reprocess"]:
+                command.append("--force")
+
+            completed = subprocess.run(
+                command,
+                cwd=BASE_DIR,
+                text=True,
+                capture_output=True,
+                timeout=3600,
+                check=False,
+            )
+            result = read_json(AUTO_SYNC_STATUS_PATH, {})
+            if completed.returncode != 0:
+                detail = completed.stderr.strip() or completed.stdout.strip()
+                if isinstance(result, dict) and result.get("error"):
+                    detail = str(result["error"])
+                raise RuntimeError(detail[-2000:] or "A sincronização terminou com erro")
+
+            response_result = {}
+            if isinstance(result, dict):
+                response_result = {
+                    "ok": result.get("ok", True),
+                    "range": result.get("range", {}),
+                    "summary": result.get("summary", {}),
+                    "deferred_count": len(result.get("deferred", []) or []),
+                    "error_count": len(result.get("errors", []) or []),
+                }
+            self.send_json(
+                {
+                    "ok": True,
+                    "trigger": trigger,
+                    "result": response_result,
+                }
+            )
+        except subprocess.TimeoutExpired:
+            self.send_json(
+                {"ok": False, "error": "A atualização excedeu o limite de 60 minutos."},
+                status=HTTPStatus.GATEWAY_TIMEOUT,
+            )
         except Exception as exc:  # noqa: BLE001
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def handle_events(self) -> None:
+        """Notify connected dashboards only when the generated HTML changes."""
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        self.close_connection = False
+
+        last_mtime = HTML_PATH.stat().st_mtime_ns if HTML_PATH.exists() else 0
+        try:
+            self.wfile.write(b"retry: 3000\n: connected\n\n")
+            self.wfile.flush()
+            ticks = 0
+            while True:
+                time.sleep(2)
+                ticks += 1
+                current_mtime = HTML_PATH.stat().st_mtime_ns if HTML_PATH.exists() else 0
+                if current_mtime > last_mtime:
+                    last_mtime = current_mtime
+                    payload = json.dumps(
+                        {"generated_at": now_br()},
+                        ensure_ascii=False,
+                    )
+                    self.wfile.write(
+                        f"event: dashboard-updated\ndata: {payload}\n\n".encode("utf-8")
+                    )
+                    self.wfile.flush()
+                elif ticks % 15 == 0:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def handle_regenerate(self) -> None:
         try:
@@ -1392,7 +1513,7 @@ def serve(host: str, port: int, keep_transcripts: bool = False) -> None:
     httpd = ThreadingHTTPServer((host, port), TodosHandler)
     url = f"http://{host}:{port}/"
     print(f"Serving dashboard at {url}")
-    print(f"POST /api/refresh writes {TRIGGER_PATH}")
+    print("POST /api/refresh runs auto_sync.py and regenerates the dashboard")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -1416,7 +1537,7 @@ def watch(interval: float, keep_transcripts: bool = False) -> None:
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate Jefferson's todos dashboard")
+    parser = argparse.ArgumentParser(description="Generate a personal todos dashboard")
     parser.add_argument("--validate", action="store_true", help="Validate todos-data.json and exit")
     parser.add_argument("--watch", action="store_true", help="Regenerate when todos-data.json changes")
     parser.add_argument("--serve", action="store_true", help="Serve the dashboard with refresh endpoints")
@@ -1579,6 +1700,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .panel-msg { margin-top: 9px; min-height: 16px; font-size: 11px; color: var(--muted); }
   .panel-msg.ok { color: var(--success); }
   .panel-msg.err { color: var(--warn); }
+  /* Bulk actions */
+  .bulk-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin-bottom: 12px; padding: 10px 13px;
+    border: 1px solid rgba(39,201,106,.30); border-radius: var(--radius);
+    background: var(--success-dim);
+  }
+  .bulk-bar.hidden { display: none; }
+  .bulk-info { font-size: 12px; color: #c4ffe0; font-weight: 700; }
+  .bulk-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  /* Meeting sync observability */
+  .sync-observer {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin-bottom: 14px; padding: 11px 13px;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--panel);
+  }
+  .sync-observer-title { font-size: 13px; font-weight: 750; }
+  .sync-observer-detail { margin-top: 2px; color: var(--muted); font-size: 11px; line-height: 1.35; }
   /* Stat buttons */
   .stats { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 1px; margin-bottom: 16px; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   .stat-btn {
@@ -1654,6 +1794,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   }
   .item:first-child { border-top: none; }
   .item:hover { background: rgba(255,255,255,.02); }
+  .item.selected { background: rgba(39,201,106,.08); box-shadow: inset 3px 0 0 var(--success); }
   .item.done { opacity: .4; }
   .item.done .item-title { text-decoration: line-through; color: var(--muted); }
   .item.alert-item { box-shadow: inset 3px 0 0 var(--risk); }
@@ -1668,6 +1809,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .checkbox:hover { border-color: var(--action); }
   .checkbox.checked { background: var(--success); border-color: var(--success); }
   .checkbox.checked::after { content: "✓"; color: #fff; font-size: 11px; font-weight: 900; line-height: 1; }
+  .checkbox.selected { background: var(--success); border-color: var(--success); }
+  .checkbox.selected::after { content: "✓"; color: #fff; font-size: 11px; font-weight: 900; line-height: 1; }
   .item-body { min-width: 0; }
   .item-row1 { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
   .item-title { font-size: 13px; font-weight: 680; line-height: 1.35; overflow-wrap: anywhere; }
@@ -1735,11 +1878,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .follow-card-title { font-size: 13px; font-weight: 680; line-height: 1.35; overflow-wrap: anywhere; }
   .follow-card-meta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 5px; font-size: 10px; color: var(--muted); }
   .follow-card-note { margin-top: 7px; padding: 5px 8px; border-left: 2px solid rgba(62,130,245,.38); background: rgba(62,130,245,.07); color: #c4e4ff; font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
-  .follow-card-actions { display: flex; gap: 6px; margin-top: 9px; flex-wrap: wrap; }
-  .ekyte-other-field { margin-top: 5px; }
-  .ekyte-other-field.hidden { display: none; }
   /* System strip */
   .system-strip { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px; padding: 9px 13px; border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--panel-soft); font-size: 11px; color: var(--muted); }
+  .system-strip .sync-footer-status {
+    display: inline-flex; align-items: center; gap: 7px;
+    min-width: min(100%, 320px);
+  }
+  .sync-info-btn {
+    width: 24px; height: 24px; flex: 0 0 24px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border); border-radius: 50%;
+    background: var(--panel); color: var(--muted);
+    font-size: 12px; font-weight: 850; line-height: 1;
+    cursor: pointer;
+  }
+  .sync-info-btn:hover, .sync-info-btn:focus-visible {
+    border-color: var(--info); color: var(--text);
+    outline: none; box-shadow: 0 0 0 3px var(--info-dim);
+  }
   .sys-item strong { color: var(--text); margin-left: 3px; }
   .sys-item.server-ok strong { color: var(--success); }
   .sys-item.server-off strong { color: var(--warn); }
@@ -1778,6 +1934,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     font-size: 10px; font-weight: 850; text-transform: uppercase;
   }
   .queue-edit-btn:hover { color: var(--text); border-color: var(--action); }
+  .meeting-sync-list { display: grid; gap: 7px; max-height: 52vh; overflow: auto; margin-top: 13px; padding-right: 3px; }
+  .meeting-sync-row {
+    display: grid; grid-template-columns: 88px minmax(0,1fr) auto; gap: 9px; align-items: start;
+    padding: 9px; border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--panel-soft);
+  }
+  .meeting-sync-row.processed { border-color: rgba(39,201,106,.30); }
+  .meeting-sync-row.skipped { border-color: rgba(245,208,32,.28); }
+  .meeting-sync-row.error { border-color: rgba(240,68,96,.36); }
+  .meeting-sync-time { color: var(--muted); font-size: 10px; font-weight: 750; white-space: nowrap; }
+  .meeting-sync-title { font-size: 12px; font-weight: 750; line-height: 1.35; overflow-wrap: anywhere; }
+  .meeting-sync-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; color: var(--muted); font-size: 10px; }
+  .meeting-sync-notes { margin-top: 5px; color: #c7cce0; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+  .sync-pill {
+    display: inline-flex; align-items: center; min-height: 18px; padding: 0 6px;
+    border: 1px solid var(--border); border-radius: 999px;
+    background: var(--panel); color: var(--muted);
+    font-size: 10px; font-weight: 850; text-transform: uppercase; white-space: nowrap;
+  }
+  .sync-pill.ok { color: #c4ffe0; background: var(--success-dim); border-color: rgba(39,201,106,.28); }
+  .sync-pill.warn { color: #fff3b0; background: var(--highlight-dim); border-color: rgba(245,208,32,.28); }
+  .sync-pill.err { color: #ffcdd5; background: var(--risk-dim); border-color: rgba(240,68,96,.32); }
   .modal-card textarea {
     width: 100%; min-height: 110px; margin-top: 13px; resize: vertical;
     border: 1px solid var(--border); border-radius: var(--radius);
@@ -1825,6 +2002,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .modal-grid .field-full { grid-column: auto; }
     .modal-actions { gap: 6px; }
     .modal-actions .btn { flex: 1; justify-content: center; }
+    .sync-observer { align-items: flex-start; flex-direction: column; }
+    .system-strip { gap: 9px 12px; }
+    .system-strip .sync-footer-status { width: 100%; }
+    .meeting-sync-row { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -1841,6 +2022,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="topbar-actions">
     <button class="btn hidden" id="flushEkyteBtn" type="button">Fila Ekyte (0)</button>
     <button class="btn hidden" id="clearFiltersBtn" type="button">✕ Limpar filtro</button>
+    <button class="btn" id="bulkSelectBtn" type="button">Selecionar</button>
     <button class="btn" id="manualToggleBtn" type="button">+ Task</button>
     <button class="btn primary" id="refreshToggleBtn" type="button">Atualizar</button>
   </div>
@@ -1869,7 +2051,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <input id="refreshTo" type="date">
       </div>
       <label class="check-field"><input id="refreshForce" type="checkbox"> Forçar</label>
-      <button class="btn primary" id="createTriggerBtn" type="button">Criar trigger</button>
+      <button class="btn primary" id="createTriggerBtn" type="button">Atualizar agora</button>
     </div>
     <div class="panel-msg" id="refreshMessage" aria-live="polite"></div>
   </section>
@@ -1913,8 +2095,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="panel-msg" id="manualMessage" aria-live="polite"></div>
   </section>
 
+  <section class="sync-observer hidden" id="syncObserver">
+    <div>
+      <div class="sync-observer-title">Última atualização</div>
+      <div class="sync-observer-detail" id="syncObserverDetail"></div>
+    </div>
+    <button class="btn" id="syncObserverBtn" type="button">Ver eventos</button>
+  </section>
+
   <div class="stats" id="stats"></div>
   <div class="filter-bar" id="filterBar"></div>
+  <section class="bulk-bar hidden" id="bulkBar">
+    <div class="bulk-info" id="bulkInfo">0 selecionadas</div>
+    <div class="bulk-actions">
+      <button class="btn" id="bulkCancelBtn" type="button">Cancelar seleção</button>
+      <button class="btn primary" id="bulkCompleteBtn" type="button">Concluir selecionadas</button>
+    </div>
+  </section>
   <div id="categories"></div>
   <div class="view-section" id="historyView"></div>
   <div class="view-section" id="followView"></div>
@@ -1938,19 +2135,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<div class="modal-backdrop hidden" id="followDismissModal" role="dialog" aria-modal="true" aria-labelledby="followDismissTitle">
-  <div class="modal-card">
-    <div class="modal-title" id="followDismissTitle">Concluir follow</div>
-    <div class="modal-task" id="followDismissTaskTitle"></div>
-    <textarea id="followDismissNote" placeholder="Nota final opcional antes de remover do radar."></textarea>
-    <div class="modal-actions">
-      <button class="btn" id="followDismissCancelBtn" type="button">Cancelar</button>
-      <button class="btn" id="followDismissSkipBtn" type="button">Remover sem nota</button>
-      <button class="btn primary" id="followDismissSaveBtn" type="button">Concluir follow</button>
-    </div>
-  </div>
-</div>
-
 <div class="modal-backdrop hidden" id="ekyteModal" role="dialog" aria-modal="true" aria-labelledby="ekyteModalTitle">
   <div class="modal-card wide">
     <div class="modal-title" id="ekyteModalTitle">Subir task no Ekyte</div>
@@ -1959,22 +2143,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="field">
         <label for="ekyteWorkspace">Workspace</label>
         <select id="ekyteWorkspace"></select>
-        <input class="ekyte-other-field hidden" id="ekyteWorkspaceOther" type="text" placeholder="ID do workspace">
       </div>
       <div class="field">
         <label for="ekyteProject">Projeto</label>
         <select id="ekyteProject"></select>
-        <input class="ekyte-other-field hidden" id="ekyteProjectOther" type="text" placeholder="ID do projeto">
       </div>
       <div class="field">
         <label for="ekyteTaskType">Tipo de task</label>
         <select id="ekyteTaskType"></select>
-        <input class="ekyte-other-field hidden" id="ekyteTaskTypeOther" type="text" placeholder="ID do tipo de task">
       </div>
       <div class="field">
         <label for="ekyteAssignee">Responsável</label>
         <select id="ekyteAssignee"></select>
-        <input class="ekyte-other-field hidden" id="ekyteAssigneeOther" type="email" placeholder="e-mail do responsável">
       </div>
       <div class="field">
         <label for="ekyteDue">Prazo</label>
@@ -2020,6 +2200,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
+<div class="modal-backdrop hidden" id="meetingSyncModal" role="dialog" aria-modal="true" aria-labelledby="meetingSyncTitle">
+  <div class="modal-card wide">
+    <div class="modal-title" id="meetingSyncTitle">Reuniões consultadas</div>
+    <div class="modal-task" id="meetingSyncSubtitle"></div>
+    <div class="meeting-sync-list" id="meetingSyncList"></div>
+    <div class="modal-actions">
+      <button class="btn primary" id="meetingSyncCloseBtn" type="button">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -2027,6 +2218,8 @@ const DATA = __DATA_JSON__;
 const SYSTEM_STATE = __SYSTEM_STATE_JSON__;
 const USER_CONFIG = __USER_CONFIG_JSON__;
 const EKYTE_CONFIG = SYSTEM_STATE.ekyte_config || {};
+const MEETING_SYNC_LOG = SYSTEM_STATE.meeting_sync_log || {summary:{},events:[]};
+const AUTO_SYNC_STATUS = SYSTEM_STATE.auto_sync_status || {};
 const sprint = DATA.sprints[DATA.meta.currentSprint];
 const storageKey = `todos-done-v2:${DATA.meta.currentSprint}`;
 const historyKey = `todos-history-v1:${DATA.meta.currentSprint}`;
@@ -2042,9 +2235,13 @@ const clientPendingEkyteIds = new Set(clientPendingEkyteQueue.map(i => i.item_id
 const filters = { scope: 'all', category: 'all', query: '' };
 let pendingCompletion = null;
 let pendingEkyte = null;
+let bulkSelectionMode = false;
+let bulkSelectedIds = new Set();
 let flushSelectedIds = new Set(clientPendingEkyteQueue.map(i => i.item_id).filter(Boolean));
 let flushValidationRows = null;
 let serverOnline = null;
+let manualRefreshRunning = false;
+let dashboardUpdatePending = false;
 const LOCAL_SERVER_BASE = 'http://127.0.0.1:8787';
 
 const $ = id => document.getElementById(id);
@@ -2053,46 +2250,49 @@ function esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => escMap[c]); }
 function attr(v) { return esc(v).replace(/`/g,'&#96;'); }
 function allItems() { return sprint.categories.flatMap(c => c.items.map(i => ({category:c, item:i}))); }
 function rows(v) { return Array.isArray(v) ? v : []; }
-const OTHER_ID = '__other__';
-const OTHER_OPTION = {id: OTHER_ID, name: 'Outros (informar ID)', is_other: true};
-const OTHER_EMAIL_OPTION = {id: OTHER_ID, name: 'Outros (informar e-mail)', email: '', is_other: true};
-function withOtherOptions(list, emailField=false) {
-  const base = rows(list).filter(r => !r.is_other && r.id !== OTHER_ID);
-  return [...base, emailField ? OTHER_EMAIL_OPTION : OTHER_OPTION];
-}
-function toggleEkyteOtherFields() {
-  const pairs = [
-    ['ekyteWorkspace','ekyteWorkspaceOther'],
-    ['ekyteProject','ekyteProjectOther'],
-    ['ekyteTaskType','ekyteTaskTypeOther'],
-    ['ekyteAssignee','ekyteAssigneeOther'],
-  ];
-  pairs.forEach(([selId, inpId]) => {
-    const inp = $(inpId);
-    if (!inp) return;
-    const show = $(selId)?.value === OTHER_ID;
-    inp.classList.toggle('hidden', !show);
-  });
-}
-function resolveSelectValue(selectId, otherInputId) {
-  const sel = $(selectId);
-  if (!sel) return '';
-  if (sel.value === OTHER_ID) return String($(otherInputId)?.value || '').trim();
-  return sel.value || '';
-}
-function resolveSelectLabel(selectId, otherInputId) {
-  const sel = $(selectId);
-  if (!sel) return '';
-  if (sel.value === OTHER_ID) {
-    const manual = String($(otherInputId)?.value || '').trim();
-    return manual ? `Outros: ${manual}` : 'Outros';
-  }
-  return selectedLabel(selectId);
-}
 function sameId(a,b) { return String(a ?? '') === String(b ?? ''); }
 function norm(v) { return String(v||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
 function byId(list, id) { return rows(list).find(r => sameId(r.id,id)); }
 function option(value, label, selected, extra='') { return `<option value="${attr(value)}"${selected?' selected':''}${extra}>${esc(label||value||'-')}</option>`; }
+function asCount(value) { const n = Number(value || 0); return Number.isFinite(n) ? n : 0; }
+function meetingEvents() { return Array.isArray(MEETING_SYNC_LOG.events) ? MEETING_SYNC_LOG.events : []; }
+function meetingSummary() {
+  return MEETING_SYNC_LOG.summary && typeof MEETING_SYNC_LOG.summary === 'object' ? MEETING_SYNC_LOG.summary : {};
+}
+function syncStatusLabel(status) {
+  return ({processed:'Processado', skipped:'Ignorado', error:'Erro'})[status] || 'Desconhecido';
+}
+function transcriptStatusLabel(status) {
+  return ({found:'Transcrição OK', missing:'Sem transcrição', not_required:'Não exigida', unknown:'Transcrição ?'})[status] || 'Transcrição ?';
+}
+function syncReasonLabel(reason) {
+  return ({
+    no_meet_link:'Sem link Meet',
+    no_conference_record:'Sem registro Meet',
+    no_transcript:'Sem transcrição',
+    already_processed:'Já processado',
+    no_action_items:'Sem tarefa',
+    no_clear_jefferson_assignment:'Sem ação clara do usuário',
+    no_clear_owner_assignment:'Sem ação clara do usuário',
+    outside_scope:'Fora do escopo',
+    rate_limit_deferred:'Adiado por cota',
+    error:'Erro'
+  })[reason] || '';
+}
+function syncPill(label, kind) { return `<span class="sync-pill ${kind||''}">${esc(label)}</span>`; }
+function syncRowKind(event) { return event.status === 'error' ? 'error' : event.status === 'processed' ? 'processed' : 'skipped'; }
+function syncPillKind(event) {
+  if (event.status === 'error') return 'err';
+  if (event.status === 'processed') return 'ok';
+  return 'warn';
+}
+function fmtShortTime(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (!Number.isNaN(d.getTime())) return d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  const m = String(value).match(/T(\\d{2}:\\d{2})/);
+  return m ? m[1] : String(value).slice(0,5);
+}
 function selectedLabel(selectId) { const opt=$(selectId)?.selectedOptions?.[0]; return opt ? opt.textContent : ''; }
 function selectedData(selectId, key) { const opt=$(selectId)?.selectedOptions?.[0]; return opt?.dataset?.[key] || ''; }
 function workspaceRows() { return rows(EKYTE_CONFIG.workspaces); }
@@ -2112,7 +2312,7 @@ function defaultTaskTypeId(workspaceId) {
   return EKYTE_CONFIG.default_task_type_id || (types.find(t => sameId(t.id,'68301')) || types[0] || {}).id || '';
 }
 function assigneeRows() { return rows(EKYTE_CONFIG.assignees); }
-function defaultAssigneeEmail() { return EKYTE_CONFIG.default_assignee_email || USER_CONFIG.user?.email || 'jefferson.vieira@v4company.com'; }
+function defaultAssigneeEmail() { return EKYTE_CONFIG.default_assignee_email || USER_CONFIG.user?.email || 'usuario@empresa.com'; }
 function tagRows(key, fallback) { const configured=rows(EKYTE_CONFIG[key]); return configured.length ? configured : fallback.map(name=>({name,id:''})); }
 function routineTagRows() { return tagRows('routine_tags',['AÇÃO GERENCIAL','SPRINT GROWTH','WEEKLY EXPANSÃO','ALINHAMENTO COMITÊ','QUALITY CONTROL','WAR']); }
 function weekTagRows() { return tagRows('week_tags',Array.from({length:52},(_,i)=>`SEMANA ${String(i+1).padStart(2,'0')}`)); }
@@ -2179,11 +2379,22 @@ async function checkServer() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 2000);
-    const r = await fetch(`${LOCAL_SERVER_BASE}/api/status`, {signal: ctrl.signal});
+    const r = await fetch(`${LOCAL_SERVER_BASE}/api/status`, {signal: ctrl.signal, cache:'no-store'});
     clearTimeout(t);
     serverOnline = r.ok;
   } catch { serverOnline = false; }
   renderSystemStrip();
+}
+function connectDashboardEvents() {
+  if (!window.EventSource || window.location.protocol === 'file:') return;
+  const events = new EventSource('/api/events');
+  events.addEventListener('dashboard-updated', () => {
+    if (manualRefreshRunning) {
+      dashboardUpdatePending = true;
+      return;
+    }
+    window.location.reload();
+  });
 }
 function syncPendingEkyteState(queue) {
   clientPendingEkyteQueue = Array.isArray(queue) ? queue : [];
@@ -2200,45 +2411,6 @@ function setDone(id, value) {
 }
 function saveTaskHistory() { localStorage.setItem(historyKey, JSON.stringify(taskHistory)); }
 function saveFollowList() { localStorage.setItem(followKey, JSON.stringify(followList)); }
-function removeFromFollow(itemId) {
-  const before = followList.length;
-  followList = followList.filter(f => f.item_id !== itemId);
-  if (followList.length !== before) saveFollowList();
-}
-let pendingFollowDismiss = null;
-function openFollowDismiss(followEntry) {
-  pendingFollowDismiss = followEntry;
-  $('followDismissTaskTitle').textContent = followEntry.title || '';
-  $('followDismissNote').value = '';
-  $('followDismissModal').classList.remove('hidden');
-  setTimeout(() => $('followDismissNote').focus(), 30);
-}
-function cancelFollowDismiss() {
-  pendingFollowDismiss = null;
-  $('followDismissModal').classList.add('hidden');
-}
-function finishFollowDismiss(withNote) {
-  if (!pendingFollowDismiss) return;
-  const note = withNote ? $('followDismissNote').value.trim() : '';
-  const itemId = pendingFollowDismiss.item_id;
-  if (note && itemId) {
-    if (!Array.isArray(taskHistory[itemId])) taskHistory[itemId] = [];
-    taskHistory[itemId].push({
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      at: new Date().toISOString(), status: 'follow_done', note,
-      title: pendingFollowDismiss.title || '',
-      source: pendingFollowDismiss.source || '',
-      category_id: pendingFollowDismiss.category_id || '',
-      category_name: pendingFollowDismiss.category_name || '',
-    });
-    saveTaskHistory();
-  }
-  removeFromFollow(itemId);
-  pendingFollowDismiss = null;
-  $('followDismissModal').classList.add('hidden');
-  render();
-  showToast(note ? 'Follow concluído com nota' : 'Follow concluído', 'ok');
-}
 function addToFollow(entry, note) {
   const {category, item} = entry;
   if (followList.some(f => f.item_id === item.id)) return;
@@ -2322,6 +2494,37 @@ function finishCompletion(withNote) {
   render();
   showToast(msg, kind);
 }
+function setBulkSelectionMode(value) {
+  bulkSelectionMode = !!value;
+  if (!bulkSelectionMode) bulkSelectedIds.clear();
+  render();
+}
+function toggleBulkSelection(entry) {
+  if (isDone(entry.item)) {
+    showToast('Task já concluída', 'warn');
+    return;
+  }
+  if (bulkSelectedIds.has(entry.item.id)) bulkSelectedIds.delete(entry.item.id);
+  else bulkSelectedIds.add(entry.item.id);
+  render();
+}
+function completeBulkSelection() {
+  const entries = allItems().filter(({item}) => bulkSelectedIds.has(item.id) && !isDone(item));
+  if (!entries.length) {
+    showToast('Nenhuma task aberta selecionada', 'warn');
+    setBulkSelectionMode(false);
+    return;
+  }
+  entries.forEach(entry => {
+    setDone(entry.item.id, true);
+    recordHistory(entry, 'done', '');
+  });
+  const total = entries.length;
+  bulkSelectedIds.clear();
+  bulkSelectionMode = false;
+  render();
+  showToast(`${total} task${total===1?'':'s'} concluída${total===1?'':'s'} sem nota`, 'ok');
+}
 function toggleDone(entry) {
   const next = !isDone(entry.item);
   setDone(entry.item.id, next);
@@ -2381,6 +2584,19 @@ function renderHeader() {
   $('headerMeta').textContent = `Sprint ${meta.currentSprint||''} · Sync ${lastSync}${alertCount!==null?` · ${alertCount} alertas`:''}`;
   const flush = $('flushEkyteBtn');
   if (flush) { const n=clientPendingEkyteQueue.length; flush.textContent=`Fila Ekyte (${n})`; flush.classList.toggle('hidden',n===0); }
+  const bulk = $('bulkSelectBtn');
+  if (bulk) {
+    bulk.textContent = bulkSelectionMode ? 'Selecionando' : 'Selecionar';
+    bulk.classList.toggle('primary', bulkSelectionMode);
+  }
+}
+function renderBulkBar() {
+  const bar = $('bulkBar');
+  if (!bar) return;
+  const selectedOpen = allItems().filter(({item}) => bulkSelectedIds.has(item.id) && !isDone(item)).length;
+  bar.classList.toggle('hidden', !bulkSelectionMode);
+  $('bulkInfo').textContent = `${selectedOpen} task${selectedOpen===1?'':'s'} selecionada${selectedOpen===1?'':'s'} para concluir`;
+  $('bulkCompleteBtn').disabled = selectedOpen === 0;
 }
 function renderStats() {
   const c = counts();
@@ -2434,6 +2650,7 @@ function canQueueEkyte(item) {
 }
 function renderItem(category, item) {
   const done = isDone(item);
+  const selected = bulkSelectedIds.has(item.id);
   const ev = item.alert_evidence || {};
   const pCls = item.priority==='urgente'?'urgente':item.priority==='recorrente'?'recorrente':'normal';
   const confTag = item.confidence ? mkTag(item.confidence==='alta'?'Conf. alta':'Verificar', item.confidence==='alta'?'alta':'media') : '';
@@ -2454,9 +2671,9 @@ function renderItem(category, item) {
   const quote = item.source_quote ? `<div class="item-quote">"${esc(item.source_quote)}"${item.source_timestamp?` · ${esc(item.source_timestamp)}`:''}</div>` : '';
   const action = item.suggested_action ? `<div class="item-action">→ ${esc(item.suggested_action)}</div>` : '';
   const hist = renderItemHistory(item, done);
-  return `<article class="item${done?' done':''}${category.id==='alertas'?' alert-item':''}" id="item-${attr(item.id)}">
+  return `<article class="item${done?' done':''}${selected?' selected':''}${category.id==='alertas'?' alert-item':''}" id="item-${attr(item.id)}">
   <div class="item-check-col">
-    <button class="checkbox${done?' checked':''}" type="button" data-toggle="${attr(item.id)}" aria-label="${done?'Reabrir':'Concluir'} task"></button>
+    <button class="checkbox${bulkSelectionMode&&selected?' selected':done?' checked':''}" type="button" data-toggle="${attr(item.id)}" aria-label="${bulkSelectionMode?(selected?'Remover da seleção':'Selecionar para concluir'):(done?'Reabrir':'Concluir')} task"></button>
   </div>
   <div class="item-body">
     <div class="item-row1">
@@ -2536,27 +2753,98 @@ function renderFollowView() {
   const q = filters.query.toLowerCase();
   const items = [...followList].reverse().filter(f => !q || ['title','note','source','category_name'].some(k => f[k] && String(f[k]).toLowerCase().includes(q)));
   if (!items.length) { view.innerHTML=`<div class="empty-state">Nenhuma task em Follow${q?' para esta busca':''}.</div>`; return; }
-  view.innerHTML = items.map(f=>`<div class="follow-card" data-follow-id="${attr(f.item_id)}">
+  view.innerHTML = items.map(f=>`<div class="follow-card">
   <div class="follow-card-title">${esc(f.title||'-')}</div>
   <div class="follow-card-meta"><span>${esc(f.category_name||f.category_id||'-')}</span>${f.source?`<span>·</span><span>${esc(f.source)}</span>`:''}${f.completed_at?`<span>·</span><span>Concluída ${esc(fmtDate(f.completed_at))}</span>`:''}</div>
   ${f.note?`<div class="follow-card-note">${esc(f.note)}</div>`:''}
-  <div class="follow-card-actions">
-    <button class="btn primary" type="button" data-follow-done="${attr(f.item_id)}">Concluir follow</button>
-  </div>
 </div>`).join('');
+}
+function renderMeetingSyncObserver() {
+  const el = $('syncObserver');
+  if (!el) return;
+  const events = meetingEvents();
+  const summary = meetingSummary();
+  const hasLog = events.length > 0 || !!MEETING_SYNC_LOG.last_run_at || Object.keys(summary).length > 0;
+  el.classList.toggle('hidden', !hasLog);
+  if (!hasLog) return;
+  const total = asCount(summary.events_total) || events.length;
+  const transcripts = asCount(summary.transcripts_found) || events.filter(e => e.transcript_status === 'found').length;
+  const missing = asCount(summary.transcripts_missing) || events.filter(e => e.transcript_status === 'missing').length;
+  const created = asCount(summary.todos_created) || events.reduce((acc,e) => acc + asCount(e.todos_created), 0);
+  const updated = asCount(summary.todos_updated) || events.reduce((acc,e) => acc + asCount(e.todos_updated), 0);
+  const review = asCount(summary.todos_review_needed) || events.reduce((acc,e) => acc + asCount(e.todos_review_needed), 0);
+  const parts = [`${total} eventos analisados`, `${transcripts} com transcrição`, `${created} tasks criadas`];
+  if (updated) parts.push(`${updated} atualizadas`);
+  if (review) parts.push(`${review} para revisar`);
+  parts.push(`${missing} sem transcrição`);
+  $('syncObserverDetail').textContent = parts.join(' · ');
+}
+function renderMeetingSyncList() {
+  const events = [...meetingEvents()].sort((a,b) => String(a.started_at||'').localeCompare(String(b.started_at||'')));
+  const list = $('meetingSyncList');
+  if (!events.length) {
+    list.innerHTML = '<div class="empty-state">Nenhum evento registrado na última atualização.</div>';
+    return;
+  }
+  list.innerHTML = events.map(event => {
+    const time = `${fmtShortTime(event.started_at)}${event.ended_at ? ' - ' + fmtShortTime(event.ended_at) : ''}`;
+    const status = syncPill(syncStatusLabel(event.status), syncPillKind(event));
+    const transcriptKind = event.transcript_status === 'found' ? 'ok' : event.transcript_status === 'missing' ? 'warn' : '';
+    const transcript = syncPill(transcriptStatusLabel(event.transcript_status), transcriptKind);
+    const reason = syncReasonLabel(event.reason);
+    const tasks = asCount(event.todos_created) + asCount(event.todos_updated);
+    const review = asCount(event.todos_review_needed);
+    const taskLabel = `${tasks} task${tasks===1?'':'s'}${review ? ` · ${review} revisar` : ''}`;
+    const meta = [
+      transcript,
+      syncPill(taskLabel, tasks ? 'ok' : ''),
+      reason ? syncPill(reason, event.status === 'error' ? 'err' : 'warn') : '',
+      event.transcript_source ? `<span>${esc(event.transcript_source)}</span>` : ''
+    ].filter(Boolean).join('');
+    return `<div class="meeting-sync-row ${syncRowKind(event)}">
+      <div class="meeting-sync-time">${esc(time)}</div>
+      <div>
+        <div class="meeting-sync-title">${esc(event.title || event.event_id || 'Evento sem título')}</div>
+        <div class="meeting-sync-meta">${meta}</div>
+        ${event.notes?`<div class="meeting-sync-notes">${esc(event.notes)}</div>`:''}
+      </div>
+      <div>${status}</div>
+    </div>`;
+  }).join('');
+}
+function openMeetingSyncModal() {
+  const summary = meetingSummary();
+  const range = MEETING_SYNC_LOG.range || {};
+  const pieces = [];
+  if (range.from || range.to) pieces.push(`${range.from || '?'} -> ${range.to || '?'}`);
+  if (MEETING_SYNC_LOG.last_run_at) pieces.push(`gerado em ${fmtDate(MEETING_SYNC_LOG.last_run_at)}`);
+  if (summary.events_total !== undefined) pieces.push(`${asCount(summary.events_total)} eventos`);
+  $('meetingSyncSubtitle').textContent = pieces.join(' · ') || 'Última atualização de reuniões.';
+  renderMeetingSyncList();
+  $('meetingSyncModal').classList.remove('hidden');
+}
+function closeMeetingSyncModal() {
+  $('meetingSyncModal').classList.add('hidden');
 }
 function renderSystemStrip() {
   const sync = SYSTEM_STATE.last_sync || {};
+  const auto = AUTO_SYNC_STATUS;
   const trigger = SYSTEM_STATE.refresh_trigger;
+  const summary = meetingSummary();
+  const lastUpdated = MEETING_SYNC_LOG.last_run_at || auto.run_finished_at || sync.last_sync_at || SYSTEM_STATE.generated_at;
+  const newTasks = asCount(summary.todos_created ?? auto.summary?.todos_created);
   const sLabel = serverOnline===null ? '…' : serverOnline ? 'Servidor local OK' : 'Sem servidor — abra via http://127.0.0.1:8787';
   const sCls = serverOnline===null ? '' : serverOnline ? 'server-ok' : 'server-off';
-  $('systemStrip').innerHTML = [
+  const systemItems = [
     {l:'Gerado', v:SYSTEM_STATE.generated_at||'—', c:''},
     {l:'Último sync', v:sync.last_sync_at||'—', c:''},
+    {l:'Auto sync', v:auto.run_finished_at ? `${auto.ok?'OK':'parcial'} · ${auto.summary?.todos_created||0} nova(s)` : 'aguardando', c:auto.ok===false?'server-off':'server-ok'},
     {l:'Fila Ekyte', v:String(clientPendingEkyteQueue.length), c:''},
     {l:'Trigger', v:trigger?`${trigger.from} → ${trigger.to}`:'nenhum', c:''},
     {l:'Servidor', v:sLabel, c:sCls},
   ].map(r=>`<div class="sys-item${r.c?' '+r.c:''}">${esc(r.l)}<strong>${esc(r.v)}</strong></div>`).join('');
+  const syncStatus = `<div class="sys-item sync-footer-status">Última atualização<strong>${esc(fmtDate(lastUpdated))} · ${newTasks} task${newTasks===1?'':'s'} nova${newTasks===1?'':'s'}</strong><button class="sync-info-btn" id="footerSyncInfoBtn" type="button" aria-label="Ver reuniões consultadas na última atualização" title="Ver reuniões consultadas">i</button></div>`;
+  $('systemStrip').innerHTML = syncStatus + systemItems;
 }
 function renderErrors() {
   const errs = Array.isArray(SYSTEM_STATE.refresh_errors) ? SYSTEM_STATE.refresh_errors : [];
@@ -2567,7 +2855,9 @@ function renderErrors() {
 }
 function render() {
   renderHeader(); renderStats(); renderFilterBar();
+  renderBulkBar();
   renderCategories(); renderHistoryView(); renderFollowView();
+  renderMeetingSyncObserver();
   renderSystemStrip(); renderErrors();
 }
 function showToast(msg, kind) {
@@ -2603,18 +2893,41 @@ async function createTrigger(forceOverride) {
   const payload={from:$('refreshFrom').value,to:$('refreshTo').value,
     force_reprocess:forceOverride===true?true:$('refreshForce').checked,preset:$('refreshPreset').value};
   const msg=$('refreshMessage');
+  const btn=$('createTriggerBtn');
   if (!payload.from||!payload.to) { msg.textContent='Selecione o período.'; msg.className='panel-msg err'; return; }
+  if (manualRefreshRunning) return;
+  manualRefreshRunning=true;
+  dashboardUpdatePending=false;
+  btn.disabled=true;
+  btn.textContent='Atualizando…';
+  msg.textContent='Consultando agenda e transcrições. Isso pode levar alguns minutos.';
+  msg.className='panel-msg';
   try {
     const r=await postJson('/api/refresh',payload);
     if (!r.ok) throw new Error(r.error||'Falha');
-    msg.textContent=`Trigger criado: ${r.trigger.from} → ${r.trigger.to}`; msg.className='panel-msg ok';
-    showToast('Trigger criado em .todos/refresh-trigger.json');
-  } catch {
+    const summary=r.result?.summary||{};
+    const created=Number(summary.todos_created||0);
+    const updated=Number(summary.todos_updated||0);
+    const deferred=Number(r.result?.deferred_count||0);
+    msg.textContent=`Atualização concluída: ${created} nova(s), ${updated} atualizada(s)${deferred?` e ${deferred} adiada(s)`:''}.`;
+    msg.className='panel-msg ok';
+    showToast('Dashboard atualizado');
+    dashboardUpdatePending=false;
+    setTimeout(()=>window.location.reload(),700);
+  } catch(e) {
     const cmd=`/atualiza-todos\nrange: ${payload.from} -> ${payload.to}\nforce_reprocess: ${payload.force_reprocess}\npreset: ${payload.preset}`;
-    await copyText(cmd);
-    msg.textContent='Servidor indisponível. Abra via http://127.0.0.1:8787 ou cole o comando copiado no Claude.';
+    const unavailable=/fetch|network|indisponível|abort/i.test(String(e?.message||''));
+    if (unavailable) await copyText(cmd);
+    msg.textContent=unavailable
+      ? 'Servidor indisponível. Abra via http://127.0.0.1:8787 ou cole o comando copiado no Claude.'
+      : `A atualização falhou: ${e?.message||'erro desconhecido'}`;
     msg.className='panel-msg err';
-    showToast('Comando copiado — cole no Claude Code','err');
+    showToast(unavailable?'Comando copiado — cole no Claude Code':`Falha: ${e?.message||'erro desconhecido'}`,'err');
+  } finally {
+    manualRefreshRunning=false;
+    btn.disabled=false;
+    btn.textContent='Atualizar agora';
+    if (dashboardUpdatePending) setTimeout(()=>window.location.reload(),700);
   }
 }
 function populateManualCategories() {
@@ -2663,7 +2976,7 @@ function buildEkyteEntry(category, item, overrides={}) {
   const week = weekTagRows().find(t => norm(t.name)===norm(weekName)) || {};
   return {item_id:item.id,sprint:DATA.meta.currentSprint,category_id:category.id,
     category_name:category.name||category.id,workspace_id:workspaceId,
-    workspace_label:overrides.workspace_label||byId(workspaceRows(),workspaceId)?.name||(USER_CONFIG.user?.full_name?'Coord. '+USER_CONFIG.user.full_name:'Coord. Jefferson Vieira'),
+    workspace_label:overrides.workspace_label||byId(workspaceRows(),workspaceId)?.name||(USER_CONFIG.user?.full_name||'Usuário'),
     project_id:projectId,project_name:overrides.project_name||byId(projectsForWorkspace(workspaceId),projectId)?.name||'',
     task_type_id:taskTypeId,task_type_name:overrides.task_type_name||byId(taskTypesForWorkspace(workspaceId),taskTypeId)?.name||'',
     assignee_email:assigneeEmail,assignee_name:overrides.assignee_name||assigneeRows().find(a=>String(a.email).toLowerCase()===String(assigneeEmail).toLowerCase())?.name||assigneeEmail,
@@ -2684,23 +2997,18 @@ async function tryWriteQueue(queue) {
 function fillSelect(selectId, list, selectedValue, emptyLabel='') {
   const empty = emptyLabel ? option('', emptyLabel, !selectedValue) : '';
   $(selectId).innerHTML = empty + rows(list).map(row => option(row.id ?? row.name, row.name || row.email || row.id, sameId(row.id ?? row.name, selectedValue), row.id?` data-id="${attr(row.id)}"`:'')).join('');
-  toggleEkyteOtherFields();
 }
 function refreshEkyteProjectAndType(draft={}) {
-  const workspaceId = $('ekyteWorkspace').value === OTHER_ID
-    ? resolveSelectValue('ekyteWorkspace', 'ekyteWorkspaceOther')
-    : $('ekyteWorkspace').value;
-  const projects = withOtherOptions(projectsForWorkspace(workspaceId));
-  const types = withOtherOptions(taskTypesForWorkspace(workspaceId));
-  fillSelect('ekyteProject', projects, draft.project_id || defaultProjectId(workspaceId), 'Selecione');
-  fillSelect('ekyteTaskType', types, draft.task_type_id || defaultTaskTypeId(workspaceId), 'Selecione');
+  const workspaceId = $('ekyteWorkspace').value;
+  fillSelect('ekyteProject', projectsForWorkspace(workspaceId), draft.project_id || defaultProjectId(workspaceId), 'Selecione');
+  fillSelect('ekyteTaskType', taskTypesForWorkspace(workspaceId), draft.task_type_id || defaultTaskTypeId(workspaceId), 'Selecione');
   updateEkyteCreateState();
 }
 function fillEkyteModal(entry, draft) {
   $('ekyteTaskTitle').textContent = draft.title || entry.item.title || '';
-  fillSelect('ekyteWorkspace', withOtherOptions(EKYTE_CONFIG.workspaces), draft.workspace_id || defaultWorkspaceId(), 'Selecione');
+  fillSelect('ekyteWorkspace', workspaceRows(), draft.workspace_id || defaultWorkspaceId(), 'Selecione');
   refreshEkyteProjectAndType(draft);
-  const assignees = withOtherOptions(assigneeRows(), true).map(a=>({id:a.email || a.id,name:`${a.name || a.email || a.id}${a.role?` · ${a.role}`:''}`}));
+  const assignees = assigneeRows().map(a=>({id:a.email,name:`${a.name || a.email}${a.role?` · ${a.role}`:''}`}));
   fillSelect('ekyteAssignee', assignees, draft.assignee_email || defaultAssigneeEmail(), 'Selecione');
   const routineOptions = routineTagRows().map(t=>({id:t.name,name:t.name, tagId:t.id||''}));
   $('ekyteRoutineTag').innerHTML = option('', 'Selecione', !draft.routine_tag_name) + routineOptions.map(t=>option(t.id,t.name,norm(t.name)===norm(draft.routine_tag_name),` data-id="${attr(t.tagId)}"`)).join('');
@@ -2713,20 +3021,16 @@ function fillEkyteModal(entry, draft) {
   updateEkyteCreateState();
 }
 function currentEkytePayload() {
-  const workspaceId = resolveSelectValue('ekyteWorkspace', 'ekyteWorkspaceOther');
-  const projectId = resolveSelectValue('ekyteProject', 'ekyteProjectOther');
-  const taskTypeId = resolveSelectValue('ekyteTaskType', 'ekyteTaskTypeOther');
-  const assigneeEmail = resolveSelectValue('ekyteAssignee', 'ekyteAssigneeOther');
   return {
     item_id: pendingEkyte?.item?.id || '',
-    workspace_id: workspaceId,
-    workspace_label: resolveSelectLabel('ekyteWorkspace', 'ekyteWorkspaceOther'),
-    project_id: projectId,
-    project_name: resolveSelectLabel('ekyteProject', 'ekyteProjectOther'),
-    task_type_id: taskTypeId,
-    task_type_name: resolveSelectLabel('ekyteTaskType', 'ekyteTaskTypeOther'),
-    assignee_email: assigneeEmail,
-    assignee_name: resolveSelectLabel('ekyteAssignee', 'ekyteAssigneeOther').split(' · ')[0],
+    workspace_id: $('ekyteWorkspace').value,
+    workspace_label: selectedLabel('ekyteWorkspace'),
+    project_id: $('ekyteProject').value,
+    project_name: selectedLabel('ekyteProject'),
+    task_type_id: $('ekyteTaskType').value,
+    task_type_name: selectedLabel('ekyteTaskType'),
+    assignee_email: $('ekyteAssignee').value,
+    assignee_name: selectedLabel('ekyteAssignee').split(' · ')[0],
     due_date: $('ekyteDue').value,
     meeting_date: $('ekyteMeetingDate').value,
     routine_tag_name: $('ekyteRoutineTag').value,
@@ -2906,7 +3210,12 @@ async function copyFlushCmd() { await copyText('/todos-promote-ekaite'); showToa
 
 document.addEventListener('click', e => {
   const toggle=e.target.closest('[data-toggle]');
-  if (toggle) { const id=toggle.getAttribute('data-toggle'); const en=allItems().find(({item})=>item.id===id); if(en) toggleDone(en); return; }
+  if (toggle) {
+    const id=toggle.getAttribute('data-toggle');
+    const en=allItems().find(({item})=>item.id===id);
+    if(en) bulkSelectionMode ? toggleBulkSelection(en) : toggleDone(en);
+    return;
+  }
   const scope=e.target.closest('[data-scope]');
   if (scope) {
     const s=scope.getAttribute('data-scope');
@@ -2940,20 +3249,12 @@ document.addEventListener('click', e => {
   if (e.target.id==='ekyteFlushCancelBtn' || e.target.id==='ekyteFlushModal') { closeEkyteFlushModal(); return; }
   if (e.target.id==='ekyteFlushValidateBtn') { validateEkyteFlush(); return; }
   if (e.target.id==='ekyteFlushCreateBtn') { createEkyteFlush(); return; }
+  if (e.target.id==='syncObserverBtn' || e.target.id==='footerSyncInfoBtn') { openMeetingSyncModal(); return; }
+  if (e.target.id==='meetingSyncCloseBtn' || e.target.id==='meetingSyncModal') { closeMeetingSyncModal(); return; }
   if (e.target.id==='completionCancelBtn') { cancelCompletion(); return; }
   if (e.target.id==='completionSkipBtn') { finishCompletion(false); return; }
   if (e.target.id==='completionSaveBtn') { finishCompletion(true); return; }
   if (e.target.id==='completionModal') { cancelCompletion(); return; }
-  if (e.target.dataset.followDone) {
-    const fid = e.target.dataset.followDone;
-    const entry = followList.find(f => f.item_id === fid);
-    if (entry) openFollowDismiss(entry);
-    return;
-  }
-  if (e.target.id==='followDismissCancelBtn') { cancelFollowDismiss(); return; }
-  if (e.target.id==='followDismissSkipBtn') { finishFollowDismiss(false); return; }
-  if (e.target.id==='followDismissSaveBtn') { finishFollowDismiss(true); return; }
-  if (e.target.id==='followDismissModal') { cancelFollowDismiss(); return; }
   if (e.target.id==='retryForceBtn') {
     const t=SYSTEM_STATE.refresh_trigger||{};
     if(t.from) $('refreshFrom').value=t.from;
@@ -2964,19 +3265,22 @@ document.addEventListener('click', e => {
 $('searchInput').addEventListener('input', e => { filters.query=e.target.value.trim(); renderCategories(); renderHistoryView(); renderFollowView(); });
 document.addEventListener('keydown', e => {
   if(e.key!=='Escape') return;
-  if(!$('followDismissModal').classList.contains('hidden')) cancelFollowDismiss();
+  if (bulkSelectionMode) setBulkSelectionMode(false);
   else if(!$('completionModal').classList.contains('hidden')) cancelCompletion();
   else if(!$('ekyteModal').classList.contains('hidden')) closeEkyteModal();
   else if(!$('ekyteFlushModal').classList.contains('hidden')) closeEkyteFlushModal();
+  else if(!$('meetingSyncModal').classList.contains('hidden')) closeMeetingSyncModal();
 });
 $('clearFiltersBtn').addEventListener('click', () => { filters.scope='all'; filters.category='all'; filters.query=''; $('searchInput').value=''; render(); });
+$('bulkSelectBtn').addEventListener('click', () => setBulkSelectionMode(!bulkSelectionMode));
+$('bulkCancelBtn').addEventListener('click', () => setBulkSelectionMode(false));
+$('bulkCompleteBtn').addEventListener('click', completeBulkSelection);
 $('manualToggleBtn').addEventListener('click', () => $('manualPanel').classList.toggle('visible'));
 $('createManualBtn').addEventListener('click', createManualTask);
 $('refreshToggleBtn').addEventListener('click', () => $('refreshPanel').classList.toggle('visible'));
 $('refreshPreset').addEventListener('change', setPresetDates);
 $('createTriggerBtn').addEventListener('click', () => createTrigger(false));
 $('ekyteWorkspace').addEventListener('change', () => refreshEkyteProjectAndType());
-['ekyteWorkspace','ekyteProject','ekyteTaskType','ekyteAssignee'].forEach(id => $(id).addEventListener('change', toggleEkyteOtherFields));
 ['ekyteProject','ekyteTaskType','ekyteAssignee','ekyteDue','ekyteMeetingDate','ekyteRoutineTag','ekyteWeekTag'].forEach(id => $(id).addEventListener('change', updateEkyteCreateState));
 $('ekyteMeetingDate').addEventListener('change', () => {
   if (!$('ekyteWeekTag').value) $('ekyteWeekTag').value = weekTagForClient($('ekyteMeetingDate').value);
@@ -2992,6 +3296,7 @@ populateManualCategories();
 setPresetDates();
 render();
 checkServer();
+connectDashboardEvents();
 </script>
 </body>
 </html>

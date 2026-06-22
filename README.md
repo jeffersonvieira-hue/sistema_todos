@@ -1,49 +1,49 @@
-# sistema_todos
+# Sistema de To-Dos
 
-Sistema de To-Dos Operacionais V2 — Colli&Co / V4.
+Dashboard local que transforma reuniões do Google Calendar e transcrições do Drive em tasks.
+O pipeline Python usa Gemini para extrair compromissos, evita duplicatas e atualiza o dashboard
+automaticamente.
 
-Documentação completa: [`Sistema de to do/README.md`](Sistema%20de%20to%20do/README.md)
+## Instalação
 
----
-
-## Acabou de clonar ou deu `git pull`?
-
-**Próximo passo obrigatório no Claude Code:**
-
-```
-/todos-installer
-```
-
-A skill guia a instalação completa (mapeamento Ekyte + Cockpit, dashboard e primeiro sync).
-
-### Antes da skill (só na 1ª vez)
-
-```bash
-cp "Sistema de to do/templates/mcp.example.json" mcp.json
-# editar tokens no mcp.json — não commitar
-
-# copiar skills para o Claude Code
-for s in todos-installer todos-sync atualiza-todos todos-dedup; do
-  mkdir -p ~/.claude/skills/$s
-  cp "Sistema de to do/skills/$s/SKILL.md" ~/.claude/skills/$s/SKILL.md
-done
-```
-
-Depois abra o Claude Code na pasta do repo e rode **`/todos-installer`**.
-
-Script de lembrete no terminal:
-
-```bash
-bash "Sistema de to do/scripts/pos-pull.sh"
-```
-
----
-
-## Clone
+Guia completo para configurar um computador novo: [INSTALACAO.md](INSTALACAO.md).
 
 ```bash
 git clone https://github.com/jeffersonvieira-hue/sistema_todos.git
 cd sistema_todos
 ```
 
-Em seguida: **`/todos-installer`** no Claude Code.
+Copie as skills:
+
+```bash
+for skill in todos-installer todos-sync atualiza-todos todos-dedup; do
+  mkdir -p "$HOME/.claude/skills/$skill"
+  cp "Sistema de to do/skills/$skill/SKILL.md" "$HOME/.claude/skills/$skill/SKILL.md"
+done
+```
+
+Depois rode `/todos-installer` no Claude Code ou use diretamente:
+
+```bash
+python3 "Sistema de to do/install_todos.py" \
+  --name "Nome da Pessoa" \
+  --email "pessoa@empresa.com" \
+  --role "coordenador" \
+  --yes
+```
+
+## Automação
+
+```bash
+python3 "Sistema de to do/install_automation.py" --name "Nome da Pessoa"
+```
+
+Esse comando:
+
+- mantém o dashboard em `http://127.0.0.1:8787/`;
+- executa o sync a cada duas horas, de segunda a sexta;
+- permite que o botão **Atualizar agora** rode o Python sob demanda;
+- recarrega a tela apenas quando uma atualização termina;
+- mantém tokens e dados pessoais fora do Git.
+
+Documentação: [`Sistema de to do/README.md`](Sistema%20de%20to%20do/README.md).

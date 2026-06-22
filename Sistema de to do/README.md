@@ -1,6 +1,9 @@
-# Sistema de To-Dos Operacionais V2
+# Sistema de To-Dos Operacionais V2.2
 
-Sistema instalável para qualquer pessoa do time Colli&Co / V4. Cada usuário tem sua pasta em `People/{Nome}/` com gerador, JSON de to-dos e dashboard HTML.
+Sistema local com dashboard, atualização manual pelo botão e sincronização automática em Python.
+Cada usuário tem configuração, dados e histórico separados.
+
+Comece pelo [guia completo de instalação](../INSTALACAO.md).
 
 ---
 
@@ -22,7 +25,7 @@ Na 1ª vez, copie as skills antes (detalhes no [guia de instalação](GUIA-INSTA
 
 ---
 
-**Novos usuários não dependem de nenhuma pasta pessoal já existente** — o instalador copia o gerador de `templates/base/`.
+**Novos usuários não dependem de nenhuma pasta pessoal já existente** — o instalador usa o gerador de `templates/base/`.
 
 ## Como funciona a pasta People
 
@@ -39,6 +42,8 @@ Exemplo gerado localmente (não versionado):
 ```text
 People/Ana Souza/
   generate_dashboard.py
+  auto_sync.py
+  setup_google_oauth.py
   todos-data.json
   todos-dashboard.html
   .todos/user-config.json
@@ -68,6 +73,8 @@ python3 "Sistema de to do/install_todos.py" \
   --yes
 
 python3 "People/Ana Souza/generate_dashboard.py" --serve --keep-transcripts
+
+python3 "Sistema de to do/install_automation.py" --name "Ana Souza"
 ```
 
 Guia completo: [GUIA-INSTALACAO-TIME.md](GUIA-INSTALACAO-TIME.md)
@@ -103,6 +110,9 @@ python3 "Sistema de to do/install_todos.py" --help
 |---|---|
 | `install_todos.py` | Cria/atualiza `People/{Nome}/` |
 | `templates/base/generate_dashboard.py` | Fonte do gerador (não usa Jefferson) |
+| `templates/base/auto_sync.py` | Calendar + Drive + Gemini + deduplicação |
+| `templates/base/setup_google_oauth.py` | Autorização Google Calendar/Drive |
+| `install_automation.py` | Runtime isolado e LaunchAgents do macOS |
 | `templates/mcp.example.json` | Modelo MCP (supergateway + streamable HTTP) |
 | `templates/categories/*.json` | Categorias por função |
 | `skills/todos-installer/SKILL.md` | Skill `/todos-installer` |
@@ -116,6 +126,29 @@ python3 "People/{Nome}/generate_dashboard.py" --validate
 python3 "People/{Nome}/generate_dashboard.py"
 python3 "People/{Nome}/generate_dashboard.py" --serve --port 8787
 python3 "People/{Nome}/generate_dashboard.py" --keep-transcripts
+python3 "People/{Nome}/auto_sync.py" --check
+python3 "People/{Nome}/auto_sync.py" --lookback-days 2 --max-files 5
+```
+
+## Comportamento do dashboard
+
+- **Atualizar agora** chama `POST /api/refresh` e executa `auto_sync.py`.
+- O botão fica bloqueado durante o processamento.
+- A página não consulta o servidor a cada 60 segundos.
+- Um canal SSE avisa a tela quando o HTML é regenerado.
+- O rodapé mostra horário da última execução e quantidade de tasks novas.
+- O ícone de informação abre as reuniões consultadas.
+
+## Credenciais
+
+- Google OAuth client: `~/.claude/gdrive/credentials.json`
+- Google refresh token: `~/.config/todos-auto-sync/google-token.json`
+- Gemini API key: `~/.config/todos-auto-sync/secrets.env`
+
+Formato:
+
+```text
+GEMINI_API_KEY=sua_chave
 ```
 
 ## Pipelines (Claude Code)

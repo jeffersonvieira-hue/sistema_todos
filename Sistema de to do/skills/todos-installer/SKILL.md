@@ -135,17 +135,37 @@ Reescrever `People/{Nome}/.todos/mapeamento.md` com tabelas preenchidas:
 
 ---
 
-## Fase C — Primeiro sync + dedup
+## Fase C — Automação local
 
-1. Executar skill **todos-sync** (usa `refresh-trigger.json`)
-2. Executar skill **todos-dedup** (automático após sync)
-3. Regenerar dashboard:
+Ativar servidor contínuo e sincronização a cada duas horas, somente de segunda a sexta:
+
+```bash
+python3 "Sistema de to do/install_automation.py" --name "{Nome}"
+```
+
+Isso cria uma cópia operacional em `~/Library/Application Support/Todos {PrimeiroNome}/`,
+instala dois LaunchAgents e mantém tokens fora do Git.
+
+Antes do primeiro sync:
+
+1. Salvar `GEMINI_API_KEY` em `~/.config/todos-auto-sync/secrets.env`.
+2. Confirmar credenciais OAuth em `~/.claude/gdrive/credentials.json`.
+3. Rodar `People/{Nome}/setup_google_oauth.py`.
+4. Validar com `People/{Nome}/auto_sync.py --check`.
+
+---
+
+## Fase D — Primeiro sync + dedup
+
+1. Executar `auto_sync.py` (usa `refresh-trigger.json`)
+2. Confirmar `meeting-sync-log.json`
+3. Regenerar dashboard, caso necessário:
 
 ```bash
 python3 "People/{Nome}/generate_dashboard.py"
 ```
 
-4. Abrir `todos-dashboard.html` e confirmar items > 0
+4. Abrir `http://127.0.0.1:8787/` e confirmar items > 0
 
 ---
 
@@ -166,3 +186,5 @@ Se ID não aparecer no MCP:
 | Cockpit sem projetos | Verificar token + filtro BU |
 | Dashboard vazio após install | Rodar Fase C (`/atualiza-todos`) |
 | Exit code 2 do Python | Normal na 1ª vez — continuar Fase B |
+| Botão Atualizar não executa | Abrir pelo servidor `127.0.0.1:8787`, não por `file://` |
+| Sync automático não roda | Conferir LaunchAgent e logs em `.todos/auto-sync-launchd*.log` |
