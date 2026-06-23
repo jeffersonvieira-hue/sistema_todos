@@ -32,6 +32,20 @@ python3 "Sistema de to do/install_todos.py" \
   --yes
 ```
 
+Para uma função fora da lista:
+
+```bash
+python3 "Sistema de to do/install_todos.py" \
+  --name "Nome da Pessoa" \
+  --email "pessoa@empresa.com" \
+  --role "outro" \
+  --role-label "Nome da função" \
+  --role-rules "Responsabilidade 1;Responsabilidade 2" \
+  --yes
+```
+
+No modo interativo, o instalador pergunta esses dados e adapta as regras de extração.
+
 ## Automação
 
 ```bash
@@ -43,6 +57,7 @@ Esse comando:
 - mantém o dashboard em `http://127.0.0.1:8787/`;
 - executa o sync a cada duas horas, de segunda a sexta;
 - permite que o botão **Atualizar agora** rode o Python sob demanda;
+- oferece temas claro e escuro com preferência salva no navegador;
 - recarrega a tela apenas quando uma atualização termina;
 - mantém tokens e dados pessoais fora do Git.
 

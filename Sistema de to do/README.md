@@ -133,6 +133,7 @@ python3 "People/{Nome}/auto_sync.py" --lookback-days 2 --max-files 5
 ## Comportamento do dashboard
 
 - **Atualizar agora** chama `POST /api/refresh` e executa `auto_sync.py`.
+- O botão de tema alterna entre os modos claro e escuro e salva a preferência no navegador.
 - O botão fica bloqueado durante o processamento.
 - A varredura ignora reuniões futuras e reuniões ainda em andamento.
 - Reuniões encerradas sem transcrição são revisitadas nas próximas rodadas.
@@ -140,6 +141,10 @@ python3 "People/{Nome}/auto_sync.py" --lookback-days 2 --max-files 5
 - Um canal SSE avisa a tela quando o HTML é regenerado.
 - O rodapé mostra horário da última execução e quantidade de tasks novas.
 - O ícone de informação abre as reuniões consultadas.
+
+Para funções que não estão na lista padrão, use `--role outro`. O instalador solicita o nome
+da função e as responsabilidades que devem virar tarefas. Em execução não interativa, informe
+`--role-label` e `--role-rules`.
 
 ## Credenciais
 

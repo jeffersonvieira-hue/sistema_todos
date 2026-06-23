@@ -48,6 +48,7 @@ LAST_ALERTS_PATH = STATE_DIR / "last-alerts.json"
 EKYTE_PENDING_PATH = STATE_DIR / "ekyte-pending.json"
 EKYTE_CONFIG_PATH = STATE_DIR / "ekyte-config.json"
 EKYTE_ERRORS_PATH = STATE_DIR / "ekyte-errors.json"
+EKYTE_LAST_RESPONSE_PATH = STATE_DIR / "ekyte-last-response.json"
 MEETING_SYNC_LOG_PATH = STATE_DIR / "meeting-sync-log.json"
 AUTO_SYNC_STATUS_PATH = STATE_DIR / "auto-sync-status.json"
 AUTO_SYNC_ERRORS_PATH = STATE_DIR / "auto-sync-errors.json"
@@ -423,12 +424,50 @@ def load_ekyte_config(write_defaults: bool = False) -> Dict[str, Any]:
     return config
 
 
+def update_ekyte_config_tag_id(tag_name: str, tag_id: Any) -> None:
+    tag_id_text = str(tag_id or "").strip()
+    if not tag_name or not tag_id_text:
+        return
+    config = load_ekyte_config(write_defaults=False)
+    changed = False
+    for key in ["routine_tags", "week_tags"]:
+        rows = config.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict) and normalize_key(row.get("name")) == normalize_key(tag_name):
+                if str(row.get("id") or "") != tag_id_text:
+                    row["id"] = tag_id_text
+                    changed = True
+    if changed:
+        config["updated_at"] = now_br()
+        write_json_atomic(EKYTE_CONFIG_PATH, config)
+
+
+def update_ekyte_config_assignee_id(email: str, user_id: Any) -> None:
+    user_id_text = str(user_id or "").strip()
+    email_norm = str(email or "").strip().lower()
+    if not email_norm or not user_id_text:
+        return
+    config = load_ekyte_config(write_defaults=False)
+    rows = config.get("assignees")
+    if not isinstance(rows, list):
+        return
+    changed = False
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("email") or "").strip().lower() == email_norm:
+            if str(row.get("id") or "") != user_id_text:
+                row["id"] = user_id_text
+                changed = True
+    if changed:
+        config["updated_at"] = now_br()
+        write_json_atomic(EKYTE_CONFIG_PATH, config)
+
+
 def item_is_ekyte_eligible(item: Dict[str, Any]) -> bool:
-    if item.get("ekaite_task_id"):
+    if item.get("ekaite_task_id") or item.get("ekyte_task_id"):
         return False
-    if item.get("review_needed"):
-        return False
-    return item.get("priority") == "urgente" and item.get("confidence") == "alta"
+    return True
 
 
 def parse_date_candidate(value: Any) -> Optional[str]:
@@ -806,10 +845,174 @@ class EkyteMcpClient:
         tools = payload.get("result", {}).get("tools", [])
         return tools if isinstance(tools, list) else []
 
+    def tool_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        return next((tool for tool in self.tools() if tool.get("name") == name), None)
+
+    def create_task_tool_name(self) -> str:
+        if self.tool_by_name("create_task"):
+            return "create_task"
+        if self.tool_by_name("ekyte_create_task"):
+            return "ekyte_create_task"
+        return ""
+
+    @staticmethod
+    def structured_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        structured = result.get("structuredContent") if isinstance(result.get("structuredContent"), dict) else {}
+        items = structured.get("items")
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+        content = result.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "text":
+                    continue
+                try:
+                    parsed = json.loads(str(part.get("text") or ""))
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, list):
+                    return [item for item in parsed if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def structured_value(payload: Dict[str, Any]) -> Any:
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        structured = result.get("structuredContent") if isinstance(result.get("structuredContent"), dict) else {}
+        if structured:
+            return structured.get("item") or structured.get("value") or structured
+        content = result.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "text":
+                    continue
+                try:
+                    return json.loads(str(part.get("text") or ""))
+                except json.JSONDecodeError:
+                    continue
+        return {}
+
+    def resolve_tag_id(self, tag_name: str) -> str:
+        wanted = normalize_key(tag_name)
+        if not wanted:
+            return ""
+        searches = [tag_name]
+        ascii_search = unicodedata.normalize("NFKD", str(tag_name))
+        ascii_search = "".join(ch for ch in ascii_search if not unicodedata.combining(ch))
+        if ascii_search != tag_name:
+            searches.append(ascii_search)
+        for search in searches:
+            payload = self.request(
+                "tools/call",
+                {
+                    "name": "list_tags",
+                    "arguments": {"type": 0, "textKey": 20, "textSearch": search},
+                },
+            )
+            items = self.structured_items(payload)
+            exact = next((item for item in items if normalize_key(item.get("name")) == wanted), None)
+            if exact and exact.get("id"):
+                tag_id = str(exact["id"])
+                update_ekyte_config_tag_id(tag_name, tag_id)
+                return tag_id
+        return ""
+
+    def resolve_executor_id(self, email: str, fallback: str = "") -> str:
+        email_norm = str(email or "").strip().lower()
+        if not email_norm:
+            return fallback
+        config = load_ekyte_config(write_defaults=False)
+        for row in config.get("assignees", []) if isinstance(config.get("assignees"), list) else []:
+            if isinstance(row, dict) and str(row.get("email") or "").strip().lower() == email_norm and row.get("id"):
+                return str(row["id"])
+        payload = self.request(
+            "tools/call",
+            {
+                "name": "list_admin_editors_users",
+                "arguments": {"textKey": 0, "textSearch": email_norm},
+            },
+        )
+        exact = next(
+            (
+                item for item in self.structured_items(payload)
+                if str(item.get("email") or "").strip().lower() == email_norm and item.get("id")
+            ),
+            None,
+        )
+        if exact:
+            update_ekyte_config_assignee_id(email_norm, exact["id"])
+            return str(exact["id"])
+        return fallback
+
+    def task_type_flow(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        payload = self.request(
+            "tools/call",
+            {
+                "name": "get_task_type_flow",
+                "arguments": {
+                    "workspaceId": int(as_id(entry.get("workspace_id"))),
+                    "id": int(as_id(entry.get("task_type_id"))),
+                },
+            },
+        )
+        value = self.structured_value(payload)
+        return value if isinstance(value, dict) else {}
+
+    def build_initial_flow(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        task_type = self.task_type_flow(entry)
+        phases = task_type.get("flowPhases") if isinstance(task_type.get("flowPhases"), list) else []
+        active_phases = [phase for phase in phases if isinstance(phase, dict) and int(phase.get("active") or 0) == 1]
+        if not active_phases:
+            raise ValueError("Tipo de task Ekyte sem fase ativa no fluxo")
+        active_phases.sort(key=lambda phase: int(phase.get("sequential") or 0))
+        first = active_phases[0]
+        due = str(entry.get("due_date") or local_today())
+        start = str(entry.get("phase_start_date") or entry.get("meeting_date") or local_today())
+        fallback_executor = str(first.get("executorId") or "")
+        executor_id = self.resolve_executor_id(str(entry.get("assignee_email") or user_default_email()), fallback_executor)
+        if not executor_id:
+            raise ValueError("Não consegui localizar executorId no Ekyte para o responsável selecionado")
+        flow = []
+        for phase in active_phases:
+            row = {
+                "phaseId": int(phase.get("phaseId") or phase.get("id")),
+                "executorId": executor_id if phase is first else str(phase.get("executorId") or executor_id),
+                "sequential": int(phase.get("sequential") or 0),
+                "effort": int(phase.get("effort") or 0),
+                "phaseStartDate": start,
+                "phaseDueDate": due,
+                "active": 1,
+                "coPhaseId": phase.get("coPhaseId"),
+                "taskTypeId": int(as_id(entry.get("task_type_id"))),
+            }
+            if phase.get("checklistId"):
+                row["checklistId"] = phase.get("checklistId")
+            flow.append(row)
+        return {
+            "allocationType": int(task_type.get("allocationType") or 20),
+            "phaseId": int(first.get("phaseId") or first.get("id")),
+            "phaseStartDate": start,
+            "phaseDueDate": due,
+            "executorId": executor_id,
+            "flow": flow,
+        }
+
+    def ensure_entry_tag_ids(self, entry: Dict[str, Any]) -> None:
+        if not entry.get("routine_tag_id") and entry.get("routine_tag_name"):
+            entry["routine_tag_id"] = self.resolve_tag_id(str(entry["routine_tag_name"]))
+        if not entry.get("week_tag_id") and entry.get("week_tag_name"):
+            entry["week_tag_id"] = self.resolve_tag_id(str(entry["week_tag_name"]))
+
     def create_task_tag_field(self) -> Tuple[str, bool]:
         """Returns (field_name, is_explicitly_supported).
         is_explicitly_supported=False means field was inferred from additionalProperties
         and the Ekyte API may silently ignore it — caller must mark task for manual tag."""
+        new_tool = self.tool_by_name("create_task")
+        if new_tool:
+            schema = new_tool.get("inputSchema", {}) if isinstance(new_tool.get("inputSchema"), dict) else {}
+            props = schema.get("properties", {})
+            if "tags" in props:
+                return "tags", True
         for tool in self.tools():
             if tool.get("name") != "ekyte_create_task":
                 continue
@@ -829,6 +1032,52 @@ class EkyteMcpClient:
         tag_field, is_explicit = self.create_task_tag_field()
         if not tag_field:
             raise ValueError("MCP Ekyte não expôs campo de tags; não vou criar task sem tag")
+        tool_name = self.create_task_tool_name()
+        if not tool_name:
+            raise ValueError("MCP Ekyte não expôs ferramenta de criação de task")
+        if tag_field == "tags":
+            self.ensure_entry_tag_ids(entry)
+            flow_payload = self.build_initial_flow(entry)
+            if not entry.get("routine_tag_id") or not entry.get("week_tag_id"):
+                raise ValueError(
+                    "Não consegui localizar IDs das tags no Ekyte: "
+                    f"{entry.get('routine_tag_name')} + {entry.get('week_tag_name')}"
+                )
+            tags_value = json.dumps(
+                [
+                    {"tagId": int(entry["routine_tag_id"]), "fromWorkspace": True},
+                    {"tagId": int(entry["week_tag_id"]), "fromWorkspace": True},
+                ],
+                ensure_ascii=False,
+            )
+            arguments = {
+                "workspaceId": int(as_id(entry.get("workspace_id"))),
+                "ctcTaskTypeId": int(as_id(entry.get("task_type_id"))),
+                "ctcTaskProjectId": int(as_id(entry.get("project_id"))),
+                "title": str(entry.get("title") or "").strip(),
+                "description": str(entry.get("description") or "").strip(),
+                "currentDueDate": entry.get("due_date"),
+                "originalDueDate": entry.get("due_date"),
+                "phaseStartDate": flow_payload["phaseStartDate"],
+                "phaseDueDate": flow_payload["phaseDueDate"],
+                "phaseId": flow_payload["phaseId"],
+                "executorId": flow_payload["executorId"],
+                "allocationType": flow_payload["allocationType"],
+                "flow": json.dumps(flow_payload["flow"], ensure_ascii=False),
+                "situation": 10,
+                "priority": 400 if entry.get("priority") == "urgente" else 200,
+                "priorityGroup": 90 if entry.get("priority") == "urgente" else 50,
+                "quantity": 1,
+                "estimatedTime": str(entry.get("estimated_time") or "60"),
+                "tags": tags_value,
+            }
+            self.ensure_initialized()
+            result = self.request("tools/call", {"name": tool_name, "arguments": arguments})
+            tool_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+            if tool_result.get("isError"):
+                content = tool_result.get("content") or tool_result
+                raise ValueError(json.dumps(content, ensure_ascii=False))
+            return result, True
         tags_value = ""
         if tag_field == "tag_ids_csv":
             if not entry.get("routine_tag_id") or not entry.get("week_tag_id"):
@@ -855,7 +1104,7 @@ class EkyteMcpClient:
             tag_field: tags_value,
         }
         self.ensure_initialized()
-        result = self.request("tools/call", {"name": "ekyte_create_task", "arguments": arguments})
+        result = self.request("tools/call", {"name": tool_name, "arguments": arguments})
         tool_result = result.get("result") if isinstance(result.get("result"), dict) else {}
         if tool_result.get("isError"):
             content = tool_result.get("content") or tool_result
@@ -876,10 +1125,23 @@ def recursive_find_task_id(payload: Any) -> Optional[str]:
     if isinstance(payload, dict):
         if "jsonrpc" in payload and "result" in payload:
             return recursive_find_task_id(payload.get("result"))
-        for key in ["task_id", "ctc_task_id", "taskId"]:
+        for key in [
+            "task_id",
+            "ctc_task_id",
+            "taskId",
+            "ctcTaskId",
+            "createdTaskId",
+            "created_task_id",
+        ]:
             task_id = coerce_ekyte_task_id(payload.get(key))
             if task_id:
                 return task_id
+        # The current Ekyte MCP returns the created task as
+        # result.structuredContent.id. JSON-RPC's own request id was already
+        # discarded above, so a long numeric id here is the task id.
+        task_id = coerce_ekyte_task_id(payload.get("id"))
+        if task_id:
+            return task_id
         if "task" in normalize_key(" ".join(str(key) for key in payload.keys())):
             task_id = coerce_ekyte_task_id(payload.get("id"))
             if task_id:
@@ -893,6 +1155,8 @@ def recursive_find_task_id(payload: Any) -> Optional[str]:
             found = recursive_find_task_id(value)
             if found:
                 return found
+    if isinstance(payload, (int, float)):
+        return coerce_ekyte_task_id(payload)
     if isinstance(payload, str):
         try:
             return recursive_find_task_id(json.loads(payload))
@@ -1376,6 +1640,15 @@ class TodosHandler(SimpleHTTPRequestHandler):
             if errors:
                 raise ValueError("; ".join(errors))
             response, tags_confirmed = client.create_task(entry)
+            write_json_atomic(
+                EKYTE_LAST_RESPONSE_PATH,
+                {
+                    "at": now_br(),
+                    "item_id": item_id,
+                    "title": entry.get("title"),
+                    "response": response,
+                },
+            )
             task_id = recursive_find_task_id(response)
             if not task_id:
                 raise ValueError("Task criada sem ID retornado pelo Ekyte; verifique manualmente antes de atualizar o dashboard")
@@ -1415,6 +1688,15 @@ class TodosHandler(SimpleHTTPRequestHandler):
                     continue
                 try:
                     response, tags_confirmed = client.create_task(entry)
+                    write_json_atomic(
+                        EKYTE_LAST_RESPONSE_PATH,
+                        {
+                            "at": now_br(),
+                            "item_id": entry.get("item_id"),
+                            "title": entry.get("title"),
+                            "response": response,
+                        },
+                    )
                     task_id = recursive_find_task_id(response)
                     if not task_id:
                         raise ValueError("Task criada sem ID retornado pelo Ekyte")
@@ -1592,6 +1874,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script>
+  try {
+    document.documentElement.dataset.theme = localStorage.getItem('todos-theme-v1') === 'light' ? 'light' : 'dark';
+  } catch (_) {
+    document.documentElement.dataset.theme = 'dark';
+  }
+</script>
 <style>
   :root {
     --bg: #000000;
@@ -1620,8 +1909,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     --font-title: 'Oswald', 'Arial Narrow', sans-serif;
     --font-body: 'Inter', "Segoe UI", system-ui, -apple-system, sans-serif;
   }
+  html[data-theme="light"] {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --panel-strong: #f0f1f3;
+    --panel-soft: #f8f9fa;
+    --border: #d9dce2;
+    --border-soft: #e8eaee;
+    --text: #18181b;
+    --muted: #62636a;
+    --action: #d9001a;
+    --action-hover: #bd0017;
+    --action-dim: rgba(217,0,26,.09);
+    --risk: #d92d4f;
+    --risk-dim: rgba(217,45,79,.09);
+    --warn: #b85c08;
+    --warn-dim: rgba(184,92,8,.09);
+    --success: #118547;
+    --success-dim: rgba(17,133,71,.09);
+    --info: #087f7b;
+    --info-dim: rgba(8,127,123,.09);
+    --highlight: #9a7600;
+    --highlight-dim: rgba(154,118,0,.09);
+    --shadow: 0 16px 42px rgba(24,24,27,.13);
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { color-scheme: dark; }
+  html[data-theme="light"] { color-scheme: light; }
   body {
     min-height: 100vh;
     background: var(--bg);
@@ -1640,6 +1954,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     border-bottom: 1px solid var(--border);
     background: rgba(15,17,23,.94); backdrop-filter: blur(20px);
   }
+  html[data-theme="light"] .topbar { background: rgba(255,255,255,.94); }
   .brand-title { font-family: var(--font-title); font-size: 16px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .brand-meta { margin-top: 1px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .search-wrap { position: relative; }
@@ -1651,6 +1966,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .search-wrap input:focus { border-color: var(--action); box-shadow: 0 0 0 3px var(--action-dim); }
   .search-icon { position: absolute; right: 11px; top: 8px; color: var(--muted); pointer-events: none; font-size: 16px; }
   .topbar-actions { display: flex; gap: 7px; align-items: center; justify-content: flex-end; }
+  .theme-toggle {
+    width: 36px; min-width: 36px; padding: 0; justify-content: center;
+    font-size: 17px; line-height: 1;
+  }
   /* Buttons */
   .btn {
     display: inline-flex; align-items: center; gap: 5px;
@@ -1666,6 +1985,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .btn:disabled { opacity: .42; cursor: not-allowed; filter: grayscale(.35); }
   .btn:disabled:hover { border-color: var(--border); background: var(--panel); }
   .btn.primary:disabled { background: #471017; border-color: #5a1820; color: #b8a3a7; }
+  html[data-theme="light"] .btn.danger { color: #a5122d; }
+  html[data-theme="light"] .btn.primary:disabled { background: #f0c9ce; border-color: #e3adb5; color: #765158; }
   /* Page */
   .page { max-width: 1100px; margin: 0 auto; padding: 18px 22px 36px; }
   /* Error banner */
@@ -1709,6 +2030,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   }
   .bulk-bar.hidden { display: none; }
   .bulk-info { font-size: 12px; color: #c4ffe0; font-weight: 700; }
+  html[data-theme="light"] .bulk-info { color: #0c6235; }
   .bulk-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   /* Meeting sync observability */
   .sync-observer {
@@ -1794,6 +2116,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   }
   .item:first-child { border-top: none; }
   .item:hover { background: rgba(255,255,255,.02); }
+  html[data-theme="light"] .item:hover { background: rgba(24,24,27,.025); }
   .item.selected { background: rgba(39,201,106,.08); box-shadow: inset 3px 0 0 var(--success); }
   .item.done { opacity: .4; }
   .item.done .item-title { text-decoration: line-through; color: var(--muted); }
@@ -1817,6 +2140,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .item-context { margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
   .item-quote { margin-top: 6px; padding: 5px 8px; border-left: 2px solid var(--border); color: #b8c0d6; background: rgba(255,255,255,.02); font-size: 11px; line-height: 1.45; }
   .item-action { margin-top: 5px; color: #f5d9b0; font-size: 11px; line-height: 1.4; }
+  html[data-theme="light"] .item-quote { color: #4b5563; background: rgba(24,24,27,.025); }
+  html[data-theme="light"] .item-action { color: #7c4a08; }
   .item-meta { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 7px; }
   .item-source { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
   /* Tags */
@@ -1838,6 +2163,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .tag.ekyte-ok { color: #c4ffe0; background: var(--success-dim); border-color: rgba(39,201,106,.28); }
   .tag.ekyte-pending { color: #fff3b0; background: var(--highlight-dim); border-color: rgba(245,208,32,.28); }
   .tag.ekyte-notag { color: #ffe4c8; background: var(--warn-dim); border-color: rgba(245,146,58,.40); }
+  html[data-theme="light"] .tag.urgente,
+  html[data-theme="light"] .tag.alert { color: #a5122d; }
+  html[data-theme="light"] .tag.normal { color: #343ba0; }
+  html[data-theme="light"] .tag.recorrente { color: #086764; }
+  html[data-theme="light"] .tag.alta,
+  html[data-theme="light"] .tag.ekyte-ok { color: #0c6235; }
+  html[data-theme="light"] .tag.media,
+  html[data-theme="light"] .tag.review,
+  html[data-theme="light"] .tag.ekyte-pending { color: #725800; }
+  html[data-theme="light"] .tag.follow { color: #245e9e; }
+  html[data-theme="light"] .tag.ekyte-notag { color: #874006; }
   a.tag { text-decoration: none; }
   a.tag:hover { filter: brightness(1.15); }
   /* Mini button */
@@ -1849,6 +2185,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     font-size: 10px; font-weight: 850; text-transform: uppercase; cursor: pointer;
   }
   .mini-btn:hover { border-color: var(--info); }
+  html[data-theme="light"] .mini-btn { color: #086764; }
   .hide-done-btn {
     min-height: 24px; padding: 0 8px;
     border: 1px solid var(--border); border-radius: 4px;
@@ -1857,11 +2194,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   }
   .hide-done-btn:hover { border-color: var(--action); color: var(--text); }
   .hide-done-btn.active { border-color: rgba(39,201,106,.42); background: var(--success-dim); color: #c4ffe0; }
+  html[data-theme="light"] .hide-done-btn.active { color: #0c6235; }
   /* Item history log */
   .history-log { margin-top: 7px; display: grid; gap: 5px; }
   .history-entry { border-left: 2px solid rgba(39,201,106,.38); background: rgba(39,201,106,.05); padding: 5px 8px; font-size: 10px; line-height: 1.4; color: #ccd4e8; }
   .history-entry.reopened { border-left-color: rgba(245,208,32,.42); background: rgba(245,208,32,.05); }
   .history-entry strong { color: #fff; font-weight: 800; }
+  html[data-theme="light"] .history-entry,
+  html[data-theme="light"] .hist-card-note { color: #374151; }
+  html[data-theme="light"] .history-entry strong { color: var(--text); }
   .history-note { margin-top: 2px; color: var(--muted); overflow-wrap: anywhere; }
   /* Empty state */
   .empty-state { padding: 18px 13px; color: var(--muted); font-size: 12px; text-align: center; }
@@ -1875,9 +2216,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .hist-card-meta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 5px; font-size: 10px; color: var(--muted); }
   .hist-card-note { margin-top: 7px; padding: 5px 8px; border-left: 2px solid rgba(39,201,106,.38); background: rgba(39,201,106,.05); color: #ccd4e8; font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
   .follow-card { border: 1px solid rgba(62,130,245,.26); border-radius: var(--radius); background: var(--panel); padding: 11px 13px; margin-bottom: 7px; }
+  .follow-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
   .follow-card-title { font-size: 13px; font-weight: 680; line-height: 1.35; overflow-wrap: anywhere; }
   .follow-card-meta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 5px; font-size: 10px; color: var(--muted); }
   .follow-card-note { margin-top: 7px; padding: 5px 8px; border-left: 2px solid rgba(62,130,245,.38); background: rgba(62,130,245,.07); color: #c4e4ff; font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+  html[data-theme="light"] .follow-card-note { color: #245e9e; }
   /* System strip */
   .system-strip { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px; padding: 9px 13px; border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--panel-soft); font-size: 11px; color: var(--muted); }
   .system-strip .sync-footer-status {
@@ -1905,11 +2248,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     display: flex; align-items: center; justify-content: center; padding: 18px;
     background: rgba(5,7,14,.78); backdrop-filter: blur(12px);
   }
+  html[data-theme="light"] .modal-backdrop { background: rgba(24,24,27,.38); }
   .modal-backdrop.hidden { display: none; }
   .modal-card {
     width: min(520px,100%); max-height: calc(100vh - 40px); overflow-y: auto;
     border: 1px solid var(--border); border-radius: var(--radius);
-    background: #121620; box-shadow: var(--shadow); padding: 18px;
+    background: var(--panel); box-shadow: var(--shadow); padding: 18px;
   }
   .modal-card.wide { width: min(920px,100%); }
   .modal-title { font-family: var(--font-title); font-size: 18px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; line-height: 1.25; }
@@ -1946,6 +2290,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .meeting-sync-title { font-size: 12px; font-weight: 750; line-height: 1.35; overflow-wrap: anywhere; }
   .meeting-sync-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; color: var(--muted); font-size: 10px; }
   .meeting-sync-notes { margin-top: 5px; color: #c7cce0; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+  html[data-theme="light"] .meeting-sync-notes { color: #4b5563; }
   .sync-pill {
     display: inline-flex; align-items: center; min-height: 18px; padding: 0 6px;
     border: 1px solid var(--border); border-radius: 999px;
@@ -1955,6 +2300,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .sync-pill.ok { color: #c4ffe0; background: var(--success-dim); border-color: rgba(39,201,106,.28); }
   .sync-pill.warn { color: #fff3b0; background: var(--highlight-dim); border-color: rgba(245,208,32,.28); }
   .sync-pill.err { color: #ffcdd5; background: var(--risk-dim); border-color: rgba(240,68,96,.32); }
+  html[data-theme="light"] .sync-pill.ok { color: #0c6235; }
+  html[data-theme="light"] .sync-pill.warn { color: #725800; }
+  html[data-theme="light"] .sync-pill.err { color: #a5122d; }
   .modal-card textarea {
     width: 100%; min-height: 110px; margin-top: 13px; resize: vertical;
     border: 1px solid var(--border); border-radius: var(--radius);
@@ -2020,6 +2368,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <span class="search-icon" aria-hidden="true">⌕</span>
   </div>
   <div class="topbar-actions">
+    <button class="btn theme-toggle" id="themeToggleBtn" type="button" aria-label="Ativar tema claro" title="Ativar tema claro">☀</button>
     <button class="btn hidden" id="flushEkyteBtn" type="button">Fila Ekyte (0)</button>
     <button class="btn hidden" id="clearFiltersBtn" type="button">✕ Limpar filtro</button>
     <button class="btn" id="bulkSelectBtn" type="button">Selecionar</button>
@@ -2224,6 +2573,7 @@ const sprint = DATA.sprints[DATA.meta.currentSprint];
 const storageKey = `todos-done-v2:${DATA.meta.currentSprint}`;
 const historyKey = `todos-history-v1:${DATA.meta.currentSprint}`;
 const followKey = `todos-follow-v1:${DATA.meta.currentSprint}`;
+const themeKey = 'todos-theme-v1';
 const doneState = JSON.parse(localStorage.getItem(storageKey) || localStorage.getItem('todos-done-v2') || '{}');
 const taskHistory = JSON.parse(localStorage.getItem(historyKey) || '{}');
 let followList = JSON.parse(localStorage.getItem(followKey) || '[]');
@@ -2246,6 +2596,23 @@ const LOCAL_SERVER_BASE = 'http://127.0.0.1:8787';
 
 const $ = id => document.getElementById(id);
 const escMap = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+function syncThemeToggle() {
+  const button = $('themeToggleBtn');
+  if (!button) return;
+  const light = currentTheme() === 'light';
+  button.textContent = light ? '☾' : '☀';
+  button.setAttribute('aria-label', light ? 'Ativar tema escuro' : 'Ativar tema claro');
+  button.title = light ? 'Ativar tema escuro' : 'Ativar tema claro';
+}
+function toggleTheme() {
+  const next = currentTheme() === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem(themeKey, next); } catch (_) {}
+  syncThemeToggle();
+}
 function esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => escMap[c]); }
 function attr(v) { return esc(v).replace(/`/g,'&#96;'); }
 function allItems() { return sprint.categories.flatMap(c => c.items.map(i => ({category:c, item:i}))); }
@@ -2255,8 +2622,48 @@ function norm(v) { return String(v||'').normalize('NFD').replace(/[\\u0300-\\u03
 function byId(list, id) { return rows(list).find(r => sameId(r.id,id)); }
 function option(value, label, selected, extra='') { return `<option value="${attr(value)}"${selected?' selected':''}${extra}>${esc(label||value||'-')}</option>`; }
 function asCount(value) { const n = Number(value || 0); return Number.isFinite(n) ? n : 0; }
-function meetingEvents() { return Array.isArray(MEETING_SYNC_LOG.events) ? MEETING_SYNC_LOG.events : []; }
+function isoDateFromValue(value) {
+  if (!value) return '';
+  const raw = String(value);
+  const m = raw.match(/\\b(20\\d{2}-\\d{2}-\\d{2})\\b/);
+  if (m) return m[1];
+  const d = new Date(raw);
+  if (!Number.isNaN(d.getTime())) return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  return '';
+}
+function meetingLogTargetDate() {
+  const range = MEETING_SYNC_LOG.range || {};
+  if (range.from && range.to && range.from === range.to) return range.from;
+  if (range.to) return range.to;
+  return isoDateFromValue(MEETING_SYNC_LOG.last_run_at);
+}
+function rawMeetingEvents() { return Array.isArray(MEETING_SYNC_LOG.events) ? MEETING_SYNC_LOG.events : []; }
+function meetingEvents() {
+  const target = meetingLogTargetDate();
+  const events = rawMeetingEvents();
+  if (!target) return events;
+  return events.filter(event => isoDateFromValue(event.started_at || event.ended_at || event.created_at) === target);
+}
 function meetingSummary() {
+  const events = meetingEvents();
+  const target = meetingLogTargetDate();
+  const rawEvents = rawMeetingEvents();
+  if (events.length) {
+    return events.reduce((acc, event) => {
+      acc.events_total += 1;
+      if (event.status === 'processed') acc.events_processed += 1;
+      if (event.status === 'skipped') acc.events_skipped += 1;
+      if (event.transcript_status === 'found') acc.transcripts_found += 1;
+      if (event.transcript_status === 'missing') acc.transcripts_missing += 1;
+      acc.todos_created += asCount(event.todos_created);
+      acc.todos_updated += asCount(event.todos_updated);
+      acc.todos_review_needed += asCount(event.todos_review_needed);
+      return acc;
+    }, {events_total:0, events_processed:0, events_skipped:0, transcripts_found:0, transcripts_missing:0, todos_created:0, todos_updated:0, todos_review_needed:0});
+  }
+  if (target && rawEvents.length) {
+    return {events_total:0, events_processed:0, events_skipped:0, transcripts_found:0, transcripts_missing:0, todos_created:0, todos_updated:0, todos_review_needed:0};
+  }
   return MEETING_SYNC_LOG.summary && typeof MEETING_SYNC_LOG.summary === 'object' ? MEETING_SYNC_LOG.summary : {};
 }
 function syncStatusLabel(status) {
@@ -2273,7 +2680,6 @@ function syncReasonLabel(reason) {
     already_processed:'Já processado',
     no_action_items:'Sem tarefa',
     no_clear_jefferson_assignment:'Sem ação clara do usuário',
-    no_clear_owner_assignment:'Sem ação clara do usuário',
     outside_scope:'Fora do escopo',
     rate_limit_deferred:'Adiado por cota',
     error:'Erro'
@@ -2313,6 +2719,11 @@ function defaultTaskTypeId(workspaceId) {
 }
 function assigneeRows() { return rows(EKYTE_CONFIG.assignees); }
 function defaultAssigneeEmail() { return EKYTE_CONFIG.default_assignee_email || USER_CONFIG.user?.email || 'usuario@empresa.com'; }
+function userWorkspaceLabel() {
+  const user = USER_CONFIG.user || {};
+  const name = user.full_name || 'Usuário';
+  return String(user.role || '').toLowerCase().includes('coord') ? `Coord. ${name}` : name;
+}
 function tagRows(key, fallback) { const configured=rows(EKYTE_CONFIG[key]); return configured.length ? configured : fallback.map(name=>({name,id:''})); }
 function routineTagRows() { return tagRows('routine_tags',['AÇÃO GERENCIAL','SPRINT GROWTH','WEEKLY EXPANSÃO','ALINHAMENTO COMITÊ','QUALITY CONTROL','WAR']); }
 function weekTagRows() { return tagRows('week_tags',Array.from({length:52},(_,i)=>`SEMANA ${String(i+1).padStart(2,'0')}`)); }
@@ -2421,6 +2832,15 @@ function addToFollow(entry, note) {
     completed_at: new Date().toISOString(), created_at: item.auto_added_at || ''
   });
   saveFollowList();
+}
+function completeFollowItem(itemId) {
+  const before = followList.length;
+  followList = followList.filter(f => f.item_id !== itemId);
+  if (followList.length !== before) {
+    saveFollowList();
+    render();
+    showToast('Follow concluído', 'ok');
+  }
 }
 function fmtDate(v) {
   try { return new Intl.DateTimeFormat('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(v)); }
@@ -2642,11 +3062,11 @@ function mkTag(label, cls) { return `<span class="tag ${cls||''}">${esc(label)}<
 function mkTagLink(label, cls, href) { return `<a class="tag ${cls||''}" href="${attr(href)}" target="_blank" rel="noreferrer">${esc(label)}</a>`; }
 function ekyteUrl(item) {
   return item.ekaite_task_url||item.ekyte_task_url||item.ekaite_url||item.ekyte_url||
-    (item.ekaite_task_id?`https://app.ekyte.com/#/tasks/list/${encodeURIComponent(item.ekaite_task_id)}/edit`:'');
+    ((item.ekaite_task_id||item.ekyte_task_id)?`https://app.ekyte.com/#/tasks/list/${encodeURIComponent(item.ekaite_task_id||item.ekyte_task_id)}/edit`:'');
 }
 function canQueueEkyte(item) {
-  if (item.ekaite_task_id||clientPendingEkyteIds.has(item.id)||item.review_needed) return false;
-  return item.priority==='urgente' && item.confidence==='alta';
+  if (item.ekaite_task_id||item.ekyte_task_id||clientPendingEkyteIds.has(item.id)) return false;
+  return true;
 }
 function renderItem(category, item) {
   const done = isDone(item);
@@ -2657,9 +3077,10 @@ function renderItem(category, item) {
   const reviewTag = item.review_needed ? mkTag('Revisar','review') : '';
   const evidTag = ev.band ? mkTag(ev.band,'alert') : '';
   const checkinTag = (ev.days_since||ev.days_since_checkin) ? mkTag(`${ev.days_since||ev.days_since_checkin}d s/checkin`,'review') : '';
-  const pending = item.ekaite_pending || clientPendingEkyteIds.has(item.id);
-  const ekyteTagLink = item.ekaite_task_id
-    ? mkTagLink(`✓ Ekyte #${item.ekaite_task_id}`,'ekyte-ok',ekyteUrl(item))
+  const pending = item.ekaite_pending || item.ekyte_pending || clientPendingEkyteIds.has(item.id);
+  const taskId = item.ekaite_task_id || item.ekyte_task_id;
+  const ekyteTagLink = taskId
+    ? mkTagLink(`✓ Ekyte #${taskId}`,'ekyte-ok',ekyteUrl(item))
     : pending ? mkTag('Ekyte pendente','ekyte-pending') : '';
   const noTagHint = item.ekyte_needs_manual_tag ? item.ekyte_tag_hint || 'adicionar tags manualmente' : '';
   const ekyteTag = item.ekyte_needs_manual_tag
@@ -2754,8 +3175,11 @@ function renderFollowView() {
   const items = [...followList].reverse().filter(f => !q || ['title','note','source','category_name'].some(k => f[k] && String(f[k]).toLowerCase().includes(q)));
   if (!items.length) { view.innerHTML=`<div class="empty-state">Nenhuma task em Follow${q?' para esta busca':''}.</div>`; return; }
   view.innerHTML = items.map(f=>`<div class="follow-card">
-  <div class="follow-card-title">${esc(f.title||'-')}</div>
-  <div class="follow-card-meta"><span>${esc(f.category_name||f.category_id||'-')}</span>${f.source?`<span>·</span><span>${esc(f.source)}</span>`:''}${f.completed_at?`<span>·</span><span>Concluída ${esc(fmtDate(f.completed_at))}</span>`:''}</div>
+  <div class="follow-card-head">
+    <div class="follow-card-title">${esc(f.title||'-')}</div>
+    <button class="mini-btn" type="button" data-complete-follow="${attr(f.item_id)}">Concluir follow</button>
+  </div>
+  <div class="follow-card-meta"><span>${esc(f.category_name||f.category_id||'-')}</span>${f.source?`<span>·</span><span>${esc(f.source)}</span>`:''}${f.completed_at?`<span>·</span><span>Entrou no follow ${esc(fmtDate(f.completed_at))}</span>`:''}</div>
   ${f.note?`<div class="follow-card-note">${esc(f.note)}</div>`:''}
 </div>`).join('');
 }
@@ -2976,7 +3400,7 @@ function buildEkyteEntry(category, item, overrides={}) {
   const week = weekTagRows().find(t => norm(t.name)===norm(weekName)) || {};
   return {item_id:item.id,sprint:DATA.meta.currentSprint,category_id:category.id,
     category_name:category.name||category.id,workspace_id:workspaceId,
-    workspace_label:overrides.workspace_label||byId(workspaceRows(),workspaceId)?.name||(USER_CONFIG.user?.full_name||'Usuário'),
+    workspace_label:overrides.workspace_label||byId(workspaceRows(),workspaceId)?.name||userWorkspaceLabel(),
     project_id:projectId,project_name:overrides.project_name||byId(projectsForWorkspace(workspaceId),projectId)?.name||'',
     task_type_id:taskTypeId,task_type_name:overrides.task_type_name||byId(taskTypesForWorkspace(workspaceId),taskTypeId)?.name||'',
     assignee_email:assigneeEmail,assignee_name:overrides.assignee_name||assigneeRows().find(a=>String(a.email).toLowerCase()===String(assigneeEmail).toLowerCase())?.name||assigneeEmail,
@@ -3232,6 +3656,8 @@ document.addEventListener('click', e => {
   if (ekyte) { queueEkyte(ekyte.getAttribute('data-ekyte')); return; }
   const editEkyte=e.target.closest('[data-edit-ekyte]');
   if (editEkyte) { closeEkyteFlushModal(); openEkyteModal(editEkyte.getAttribute('data-edit-ekyte')); return; }
+  const completeFollow=e.target.closest('[data-complete-follow]');
+  if (completeFollow) { completeFollowItem(completeFollow.getAttribute('data-complete-follow')); return; }
   const flushItem=e.target.closest('[data-flush-item]');
   if (flushItem) {
     const id=flushItem.getAttribute('data-flush-item');
@@ -3272,6 +3698,7 @@ document.addEventListener('keydown', e => {
   else if(!$('meetingSyncModal').classList.contains('hidden')) closeMeetingSyncModal();
 });
 $('clearFiltersBtn').addEventListener('click', () => { filters.scope='all'; filters.category='all'; filters.query=''; $('searchInput').value=''; render(); });
+$('themeToggleBtn').addEventListener('click', toggleTheme);
 $('bulkSelectBtn').addEventListener('click', () => setBulkSelectionMode(!bulkSelectionMode));
 $('bulkCancelBtn').addEventListener('click', () => setBulkSelectionMode(false));
 $('bulkCompleteBtn').addEventListener('click', completeBulkSelection);
@@ -3294,6 +3721,7 @@ $('ekyteFlushSelectAll').addEventListener('change', e => {
 });
 populateManualCategories();
 setPresetDates();
+syncThemeToggle();
 render();
 checkServer();
 connectDashboardEvents();

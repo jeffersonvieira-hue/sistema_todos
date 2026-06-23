@@ -72,6 +72,19 @@ Funções aceitas:
 - `atendimento-crm`;
 - `outro`.
 
+Ao selecionar `outro` no modo interativo, o instalador pergunta o nome real da função e as
+responsabilidades que devem ser consideradas pelo extrator. No modo não interativo, use:
+
+```bash
+python3 "Sistema de to do/install_todos.py" \
+  --name "Nome da Pessoa" \
+  --email "pessoa@empresa.com" \
+  --role "outro" \
+  --role-label "Nome da função" \
+  --role-rules "Responsabilidade 1;Responsabilidade 2" \
+  --yes
+```
+
 O comando cria:
 
 ```text

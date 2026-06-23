@@ -6,9 +6,9 @@
         "-y",
         "supergateway@latest",
         "--streamableHttp",
-        "https://n8n4.services4.collieassociados.com/mcp/mcp-ekyte-direct-v2",
+        "https://api.ekyte.com/mcp?token=<PREENCHER_TOKEN_MCP_EKYTE>",
         "--header",
-        "Authorization: Bearer <PREENCHER_TOKEN_EKYTE>",
+        "Authorization: Bearer <PREENCHER_TOKEN_MCP_EKYTE>",
         "--logLevel",
         "none"
       ]

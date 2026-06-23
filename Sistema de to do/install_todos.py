@@ -307,7 +307,19 @@ def collect_user_info(args: argparse.Namespace) -> dict:
     else:
         role = ask_choice("Função principal:", VALID_ROLES, "coordenador")
 
-    role_label = ROLE_LABELS.get(role, role)
+    role_label = args.role_label or ROLE_LABELS.get(role, role)
+    custom_role_rules = [
+        rule.strip()
+        for rule in (args.role_rules or "").split(";")
+        if rule.strip()
+    ]
+    if role == "outro" and not non_interactive:
+        role_label = ask("Nome da sua função", role_label)
+        raw_rules = input(
+            "Responsabilidades que devem virar tarefas (separe por ponto e vírgula): "
+        ).strip()
+        if raw_rules:
+            custom_role_rules = [rule.strip() for rule in raw_rules.split(";") if rule.strip()]
 
     print(f"\n✅ Identidade confirmada:")
     print(f"   Nome:    {full_name} ({display_name})")
@@ -341,6 +353,7 @@ def collect_user_info(args: argparse.Namespace) -> dict:
         "email": email,
         "role": role,
         "role_label": role_label,
+        "custom_role_rules": custom_role_rules,
         "bu": bu,
         "squad": squad,
         "use_calendar": use_calendar,
@@ -358,6 +371,8 @@ def collect_user_info(args: argparse.Namespace) -> dict:
 def build_user_config(info: dict) -> dict:
     role_cfg = load_role_config(info["role"])
     categories = [c["id"] for c in load_categories(info["role"])]
+    role_rules = list(role_cfg.get("extraction_rules", []))
+    role_rules.extend(info.get("custom_role_rules", []))
 
     return {
         "schema_version": "2.0",
@@ -390,7 +405,7 @@ def build_user_config(info: dict) -> dict:
             "capture_follow_ups": True,
             "capture_role_responsibilities": True,
             "ignore_other_people_tasks": True,
-            "role_rules": role_cfg.get("extraction_rules", []),
+            "role_rules": role_rules,
         },
         "dashboard": {
             "title": f"Todos — {info['full_name']}",
@@ -628,6 +643,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--name", help="Nome completo do usuário")
     parser.add_argument("--email", help="E-mail V4 do usuário")
     parser.add_argument("--role", choices=VALID_ROLES, help="Função do usuário")
+    parser.add_argument("--role-label", help="Nome da função quando --role=outro")
+    parser.add_argument(
+        "--role-rules",
+        help="Responsabilidades específicas separadas por ponto e vírgula",
+    )
     parser.add_argument("--display", help="Nome curto de exibição")
     parser.add_argument("--bu", help="Unidade/BU")
     parser.add_argument("--squad", help="Squad")
