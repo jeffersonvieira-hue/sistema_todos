@@ -48,6 +48,7 @@ DRY_RUN_PATH = STATE_DIR / "auto-sync-dry-run.json"
 TRIGGER_PATH = STATE_DIR / "refresh-trigger.json"
 LOCK_PATH = STATE_DIR / "auto-sync.lock"
 USER_CONFIG_PATH = STATE_DIR / "user-config.json"
+PENDING_EVENT_RETENTION_DAYS = 7
 
 GOOGLE_CLIENT_PATH = Path.home() / ".claude/gdrive/credentials.json"
 GOOGLE_TOKEN_PATH = Path.home() / ".config/todos-auto-sync/google-token.json"
@@ -234,9 +235,41 @@ def day_bounds(day: date) -> Tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
-def list_calendar_events(token: str, start_day: date, end_day: date) -> List[Dict[str, Any]]:
+def parse_google_datetime(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone_br())
+    return parsed.astimezone(timezone_br())
+
+
+def event_end_at(event: Dict[str, Any]) -> Optional[datetime]:
+    end_value = str(event.get("end", {}).get("dateTime") or "")
+    start_value = str(event.get("start", {}).get("dateTime") or "")
+    return parse_google_datetime(end_value) or parse_google_datetime(start_value)
+
+
+def event_has_ended(event: Dict[str, Any], cutoff: datetime) -> bool:
+    ended_at = event_end_at(event)
+    return bool(ended_at and ended_at <= cutoff)
+
+
+def list_calendar_events(
+    token: str,
+    start_day: date,
+    end_day: date,
+    cutoff: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
     start, _ = day_bounds(start_day)
     _, end = day_bounds(end_day)
+    if cutoff and cutoff < end:
+        end = cutoff
+    if end <= start:
+        return []
     events: List[Dict[str, Any]] = []
     page_token: Optional[str] = None
     while True:
@@ -257,9 +290,18 @@ def list_calendar_events(token: str, start_day: date, end_day: date) -> List[Dic
     return events
 
 
-def list_drive_transcripts(token: str, start_day: date, end_day: date) -> List[Dict[str, Any]]:
+def list_drive_transcripts(
+    token: str,
+    start_day: date,
+    end_day: date,
+    cutoff: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
     start, _ = day_bounds(start_day)
     _, end = day_bounds(end_day)
+    if cutoff and cutoff < end:
+        end = cutoff
+    if end <= start:
+        return []
     query = (
         "trashed = false and "
         "mimeType = 'application/vnd.google-apps.document' and "
@@ -323,6 +365,42 @@ def event_start(event: Dict[str, Any]) -> str:
     return str(start.get("dateTime") or start.get("date") or "")
 
 
+def pending_event_snapshot(event: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": event.get("id"),
+        "summary": event.get("summary"),
+        "status": event.get("status"),
+        "start": event.get("start", {}),
+        "end": event.get("end", {}),
+        "hangoutLink": event.get("hangoutLink"),
+        "conferenceData": event.get("conferenceData"),
+        "attendees": event.get("attendees", []),
+        "htmlLink": event.get("htmlLink"),
+    }
+
+
+def merge_pending_events(
+    current_events: Sequence[Dict[str, Any]],
+    stored_events: Sequence[Dict[str, Any]],
+    cutoff: datetime,
+) -> List[Dict[str, Any]]:
+    oldest_allowed = cutoff - timedelta(days=PENDING_EVENT_RETENTION_DAYS)
+    merged: Dict[str, Dict[str, Any]] = {}
+    for event in [*stored_events, *current_events]:
+        event_id = str(event.get("id") or "")
+        ended_at = event_end_at(event)
+        if (
+            not event_id
+            or not ended_at
+            or ended_at > cutoff
+            or ended_at < oldest_allowed
+            or not is_meeting_event(event)
+        ):
+            continue
+        merged[event_id] = event
+    return sorted(merged.values(), key=event_start)
+
+
 def is_meeting_event(event: Dict[str, Any]) -> bool:
     if event.get("status") == "cancelled":
         return False
@@ -341,8 +419,10 @@ def is_meeting_event(event: Dict[str, Any]) -> bool:
 
 def match_event(transcript: Dict[str, Any], events: Sequence[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], float]:
     title_tokens = tokens(transcript_title(transcript.get("name", "")))
+    transcript_at = parse_google_datetime(str(transcript.get("createdTime") or ""))
     best: Optional[Dict[str, Any]] = None
     best_score = 0.0
+    best_distance = float("inf")
     for event in events:
         if not is_meeting_event(event):
             continue
@@ -350,8 +430,14 @@ def match_event(transcript: Dict[str, Any], events: Sequence[Dict[str, Any]]) ->
         if not title_tokens or not event_tokens:
             continue
         score = len(title_tokens & event_tokens) / max(len(title_tokens | event_tokens), 1)
-        if score > best_score:
-            best, best_score = event, score
+        event_at = parse_google_datetime(event_start(event))
+        distance = (
+            abs((transcript_at - event_at).total_seconds())
+            if transcript_at and event_at
+            else float("inf")
+        )
+        if score > best_score or (score == best_score and distance < best_distance):
+            best, best_score, best_distance = event, score, distance
     return best, best_score
 
 
@@ -752,7 +838,8 @@ def resolve_range(args: argparse.Namespace) -> Tuple[date, date, Dict[str, Any]]
 
 def sync(args: argparse.Namespace) -> Dict[str, Any]:
     start_day, end_day, range_meta = resolve_range(args)
-    run_started = now_iso()
+    run_cutoff = now_br()
+    run_started = run_cutoff.isoformat(timespec="seconds")
     token = google_access_token()
     data = read_json(DATA_PATH, {})
     if not data:
@@ -761,9 +848,16 @@ def sync(args: argparse.Namespace) -> Dict[str, Any]:
     processed = set(last_sync.get("processed_file_ids", []))
     force = bool(range_meta.get("force_reprocess"))
 
-    events = list_calendar_events(token, start_day, end_day)
-    files = list_drive_transcripts(token, start_day, end_day)
-    meeting_events = [event for event in events if is_meeting_event(event)]
+    events = list_calendar_events(token, start_day, end_day, run_cutoff)
+    files = list_drive_transcripts(token, start_day, end_day, run_cutoff)
+    ended_events = [
+        event for event in events
+        if is_meeting_event(event) and event_has_ended(event, run_cutoff)
+    ]
+    stored_pending = last_sync.get("pending_transcript_events", [])
+    if not isinstance(stored_pending, list):
+        stored_pending = []
+    meeting_events = merge_pending_events(ended_events, stored_pending, run_cutoff)
 
     logs_by_event: Dict[str, Dict[str, Any]] = {}
     for event in meeting_events:
@@ -771,7 +865,7 @@ def sync(args: argparse.Namespace) -> Dict[str, Any]:
         log["status"] = "skipped"
         log["transcript_status"] = "missing"
         log["reason"] = "no_transcript"
-        log["notes"] = "Evento encontrado; transcrição ainda não localizada no Drive."
+        log["notes"] = "Reunião encerrada; transcrição ainda não localizada no Drive. Será revista na próxima rodada."
         logs_by_event[str(log["event_id"])] = log
 
     created_ids: List[str] = []
@@ -1012,6 +1106,12 @@ def sync(args: argparse.Namespace) -> Dict[str, Any]:
         write_json_atomic(DATA_PATH, data)
 
     processed.update(newly_processed)
+    pending_transcript_events = [
+        pending_event_snapshot(event)
+        for event in meeting_events
+        if str(event.get("id") or "") in logs_by_event
+        and logs_by_event[str(event.get("id"))].get("transcript_status") == "missing"
+    ]
     stats = last_sync.setdefault("stats", {})
     stats["total_runs"] = int(stats.get("total_runs", 0)) + 1
     stats["total_items_added"] = int(stats.get("total_items_added", 0)) + len(created_ids)
@@ -1024,11 +1124,13 @@ def sync(args: argparse.Namespace) -> Dict[str, Any]:
             "last_sync_at": now_iso(),
             "last_meeting_processed": f"{start_day.isoformat()}/{end_day.isoformat()}",
             "processed_file_ids": sorted(processed),
+            "pending_transcript_events": pending_transcript_events,
             "last_result": {
                 "range": f"{start_day.isoformat()}/{end_day.isoformat()}",
                 "created": created_ids,
                 "updated": sorted(set(updated_ids)),
                 "events_total": len(event_logs),
+                "pending_transcripts": len(pending_transcript_events),
                 "automatic": True,
             },
         }

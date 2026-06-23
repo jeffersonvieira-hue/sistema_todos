@@ -134,6 +134,8 @@ python3 "People/{Nome}/auto_sync.py" --lookback-days 2 --max-files 5
 
 - **Atualizar agora** chama `POST /api/refresh` e executa `auto_sync.py`.
 - O botão fica bloqueado durante o processamento.
+- A varredura ignora reuniões futuras e reuniões ainda em andamento.
+- Reuniões encerradas sem transcrição são revisitadas nas próximas rodadas.
 - A página não consulta o servidor a cada 60 segundos.
 - Um canal SSE avisa a tela quando o HTML é regenerado.
 - O rodapé mostra horário da última execução e quantidade de tasks novas.

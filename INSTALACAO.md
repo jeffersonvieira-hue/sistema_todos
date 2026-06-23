@@ -190,6 +190,8 @@ O instalador:
 - instala o servidor do dashboard;
 - instala o agendamento automático;
 - executa o sync a cada 7.200 segundos;
+- considera somente reuniões que já terminaram quando a rodada começa;
+- revisita reuniões encerradas cuja transcrição ainda não foi publicada;
 - restringe a execução automática a segunda, terça, quarta, quinta e sexta-feira.
 
 Abra:

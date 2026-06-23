@@ -28,6 +28,20 @@ python3 "{BASE}/auto_sync.py" --from "{from}" --to "{to}" --max-files 0
 
 Continue com o fluxo abaixo apenas quando o Python automático não estiver disponível.
 
+## Janela temporal da execução automática
+
+Cada rodada deve congelar `run_cutoff` no instante em que começou:
+
+- consultar apenas eventos até `run_cutoff`;
+- processar somente reuniões cujo término seja menor ou igual a `run_cutoff`;
+- ignorar reuniões futuras e reuniões ainda em andamento;
+- não registrar reunião futura como `no_transcript`.
+
+Reuniões encerradas sem transcrição devem ser salvas em
+`last-sync.json.pending_transcript_events[]` e revisitadas nas rodadas seguintes.
+A remoção da fila acontece somente quando uma transcrição correspondente é encontrada.
+O Python mantém essa fila por sete dias para absorver atrasos do Google Drive/Gemini.
+
 ## Setup — resolver paths
 
 ```
